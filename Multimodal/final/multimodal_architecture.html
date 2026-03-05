@@ -1,0 +1,547 @@
+                <table class="comparison-table">
+                    <thead>
+                        <tr>
+                            <th>Khía Cạnh</th>
+                            <th>Hợp Nhất Phía Client</th>
+                            <th>Hợp Nhất Phía Server (Hiện Tại)</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        <tr>
+                            <td><strong>Hiệu Suất</strong></td>
+                            <td class="cons">Hạn chế bởi khả năng thiết bị</td>
+                            <td class="pros">Cụm GPU/CPU hiệu suất cao</td>
+                        </tr>
+                        <tr>
+                            <td><strong>Độ Trễ</strong></td>
+                            <td class="pros">Không cần truyền mạng cho hợ<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Multimodal Architecture</title>
+    <style>
+        body {
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            margin: 0;
+            padding: 20px;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            min-height: 100vh;
+        }
+
+        .container {
+            max-width: 1400px;
+            margin: 0 auto;
+            background: white;
+            border-radius: 20px;
+            box-shadow: 0 20px 40px rgba(0,0,0,0.1);
+            overflow: hidden;
+        }
+
+        .header {
+            background: linear-gradient(135deg, #2c3e50, #34495e);
+            color: white;
+            padding: 30px;
+            text-align: center;
+        }
+
+        .header h1 {
+            margin: 0;
+            font-size: 2.5em;
+            font-weight: 300;
+        }
+
+        .content {
+            padding: 40px;
+        }
+
+        .architecture-section {
+            margin-bottom: 50px;
+        }
+
+        .section-title {
+            font-size: 1.8em;
+            color: #2c3e50;
+            margin-bottom: 30px;
+            padding-bottom: 10px;
+            border-bottom: 3px solid #3498db;
+        }
+
+        .diagram-container {
+            background: #f8f9fa;
+            border-radius: 15px;
+            padding: 30px;
+            margin: 20px 0;
+            box-shadow: 0 5px 15px rgba(0,0,0,0.1);
+        }
+
+        .flow-diagram {
+            display: flex;
+            flex-direction: column;
+            gap: 30px;
+        }
+
+        .flow-row {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            gap: 20px;
+        }
+
+        .flow-box {
+            background: white;
+            border: 2px solid #e0e0e0;
+            border-radius: 10px;
+            padding: 20px;
+            text-align: center;
+            min-width: 150px;
+            box-shadow: 0 4px 8px rgba(0,0,0,0.1);
+            transition: all 0.3s ease;
+        }
+
+        .flow-box:hover {
+            transform: translateY(-5px);
+            box-shadow: 0 8px 16px rgba(0,0,0,0.15);
+        }
+
+        .data-input {
+            background: linear-gradient(135deg, #74b9ff, #0984e3);
+            color: white;
+        }
+
+        .preprocessing {
+            background: linear-gradient(135deg, #fd79a8, #e84393);
+            color: white;
+        }
+
+        .model-component {
+            background: linear-gradient(135deg, #55a3ff, #003d82);
+            color: white;
+        }
+
+        .fusion {
+            background: linear-gradient(135deg, #fd7e14, #dc2626);
+            color: white;
+            font-weight: bold;
+        }
+
+        .output {
+            background: linear-gradient(135deg, #00b894, #00826b);
+            color: white;
+        }
+
+        .arrow {
+            font-size: 2em;
+            color: #74b9ff;
+            font-weight: bold;
+        }
+
+        .multimodal-detail {
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 30px;
+            margin: 30px 0;
+        }
+
+        .branch-detail {
+            background: white;
+            border-radius: 15px;
+            padding: 25px;
+            border: 2px solid #e0e0e0;
+            box-shadow: 0 5px 15px rgba(0,0,0,0.1);
+        }
+
+        .branch-title {
+            font-size: 1.3em;
+            font-weight: bold;
+            color: #2c3e50;
+            margin-bottom: 15px;
+            text-align: center;
+            padding: 10px;
+            background: linear-gradient(135deg, #74b9ff, #0984e3);
+            color: white;
+            border-radius: 8px;
+        }
+
+        .layer-list {
+            list-style: none;
+            padding: 0;
+        }
+
+        .layer-list li {
+            background: #f8f9fa;
+            margin: 8px 0;
+            padding: 10px 15px;
+            border-radius: 8px;
+            border-left: 4px solid #74b9ff;
+        }
+
+        .fusion-analysis {
+            background: linear-gradient(135deg, #fd7e14, #dc2626);
+            color: white;
+            border-radius: 15px;
+            padding: 30px;
+            margin: 30px 0;
+        }
+
+        .fusion-title {
+            font-size: 1.5em;
+            margin-bottom: 20px;
+            text-align: center;
+        }
+
+        .comparison-table {
+            width: 100%;
+            border-collapse: collapse;
+            background: white;
+            border-radius: 10px;
+            overflow: hidden;
+            margin: 20px 0;
+        }
+
+        .comparison-table th,
+        .comparison-table td {
+            padding: 15px;
+            text-align: left;
+            border-bottom: 1px solid #e0e0e0;
+        }
+
+        .comparison-table th {
+            background: #2c3e50;
+            color: white;
+            font-weight: bold;
+        }
+
+        .comparison-table td {
+            color: #2c3e50;
+        }
+
+        .pros {
+            color: #00b894;
+            font-weight: bold;
+        }
+
+        .cons {
+            color: #e17055;
+            font-weight: bold;
+        }
+
+        .training-pipeline {
+            display: flex;
+            flex-wrap: wrap;
+            gap: 20px;
+            justify-content: center;
+            margin: 30px 0;
+        }
+
+        .pipeline-step {
+            background: white;
+            border: 2px solid #74b9ff;
+            border-radius: 15px;
+            padding: 20px;
+            text-align: center;
+            min-width: 200px;
+            box-shadow: 0 5px 15px rgba(0,0,0,0.1);
+            transition: all 0.3s ease;
+        }
+
+        .pipeline-step:hover {
+            transform: scale(1.05);
+            border-color: #0984e3;
+        }
+
+        .step-number {
+            background: #74b9ff;
+            color: white;
+            border-radius: 50%;
+            width: 30px;
+            height: 30px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            margin: 0 auto 10px;
+            font-weight: bold;
+        }
+
+        .code-snippet {
+            background: #2c3e50;
+            color: #ecf0f1;
+            padding: 20px;
+            border-radius: 10px;
+            font-family: 'Courier New', monospace;
+            margin: 20px 0;
+            overflow-x: auto;
+        }
+
+        .highlight {
+            background: rgba(116, 185, 255, 0.2);
+            padding: 2px 4px;
+            border-radius: 4px;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <div class="header">
+            <h1>🏥 Hệ Thống Phát Hiện Ung Thư Vú Đa Phương Thức</h1>
+            <p>Phân Tích Kiến Trúc với Chiến Lược Late Fusion</p>
+        </div>
+
+        <div class="content">
+            <!-- Overall Architecture -->
+            <div class="architecture-section">
+                <h2 class="section-title">🏗️ Kiến Trúc Hệ Thống Tổng Thể</h2>
+                
+                <div class="diagram-container">
+                    <div class="flow-diagram">
+                        <!-- Data Input Layer -->
+                        <div class="flow-row">
+                            <div class="flow-box data-input">
+                                <h3>📊 Dữ Liệu Bảng</h3>
+                                <p>Đặc trưng CSV:<br>BG, CLASS, X, Y, RADIUS,<br>DENSITY, BI-RADS</p>
+                            </div>
+                            <div class="arrow">→</div>
+                            <div class="flow-box preprocessing">
+                                <h3>🔧 Tiền Xử Lý</h3>
+                                <p>StandardScaler<br>Mã Hóa One-Hot<br>Ánh Xạ Đặc Trưng</p>
+                            </div>
+                            <div class="arrow">→</div>
+                            <div class="flow-box model-component">
+                                <h3>🧠 Nhánh Dữ Liệu Bảng</h3>
+                                <p>Các Lớp Dense<br>64 → 32 đơn vị<br>Dropout 0.3</p>
+                            </div>
+                        </div>
+
+                        <div class="flow-row">
+                            <div class="flow-box data-input">
+                                <h3>🖼️ Dữ Liệu Hình Ảnh</h3>
+                                <p>Ảnh Chụp Tuyến Vú<br>224x224 Xám<br>Định Dạng PGM</p>
+                            </div>
+                            <div class="arrow">→</div>
+                            <div class="flow-box preprocessing">
+                                <h3>🎨 Xử Lý Hình Ảnh</h3>
+                                <p>Thay đổi kích thước 224x224<br>Chuẩn hóa [0,1]<br>Xám → RGB</p>
+                            </div>
+                            <div class="arrow">→</div>
+                            <div class="flow-box model-component">
+                                <h3>🔍 Nhánh Hình Ảnh</h3>
+                                <p>ResNet50 (Đã huấn luyện)<br>Flatten → Dense 128<br>Dropout 0.5</p>
+                            </div>
+                        </div>
+
+                        <!-- Fusion Layer -->
+                        <div class="flow-row" style="justify-content: center;">
+                            <div class="flow-box fusion">
+                                <h3>🔗 HỢP NHẤT MUỘN</h3>
+                                <p>Nối Đặc Trưng<br>Bảng (32) + Hình Ảnh (128)<br>Kết Hợp: 160 đặc trưng</p>
+                            </div>
+                        </div>
+
+                        <!-- Final Layers -->
+                        <div class="flow-row" style="justify-content: center;">
+                            <div class="flow-box model-component">
+                                <h3>🎯 Đầu Phân Loại</h3>
+                                <p>Dense 64 → Dense 32<br>→ Dense 3 (Softmax)<br>Dropout 0.3</p>
+                            </div>
+                            <div class="arrow">→</div>
+                            <div class="flow-box output">
+                                <h3>📋 Kết Quả</h3>
+                                <p>Bình Thường, Lành Tính,<br>Ác Tính<br>+ Độ Tin Cậy</p>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Detailed Model Components -->
+            <div class="architecture-section">
+                <h2 class="section-title">🔬 Chi Tiết Các Thành Phần Mô Hình</h2>
+                
+                <div class="multimodal-detail">
+                    <div class="branch-detail">
+                        <div class="branch-title">📊 Nhánh Dữ Liệu Bảng</div>
+                        <ul class="layer-list">
+                            <li><strong>Đầu vào:</strong> 7 đặc trưng (BG, CLASS_NUM, X, Y, RADIUS, DENSITY_NUM, BIRADS_NUM)</li>
+                            <li><strong>Lớp Dense 1:</strong> 64 đơn vị, kích hoạt ReLU</li>
+                            <li><strong>Dropout:</strong> Tỷ lệ 0.3</li>
+                            <li><strong>Lớp Dense 2:</strong> 32 đơn vị, kích hoạt ReLU</li>
+                            <li><strong>Đầu ra:</strong> Vector đặc trưng 32 chiều</li>
+                        </ul>
+                    </div>
+
+                    <div class="branch-detail">
+                        <div class="branch-title">🖼️ Nhánh Dữ Liệu Hình Ảnh</div>
+                        <ul class="layer-list">
+                            <li><strong>Đầu vào:</strong> Hình ảnh xám 224x224x1</li>
+                            <li><strong>Lớp Lambda:</strong> Chuyển đổi sang RGB (lặp lại kênh)</li>
+                            <li><strong>ResNet50:</strong> Đã huấn luyện trên ImageNet, trọng số cố định</li>
+                            <li><strong>Flatten:</strong> Chuyển đổi đặc trưng 2D thành 1D</li>
+                            <li><strong>Dense:</strong> 128 đơn vị, kích hoạt ReLU</li>
+                            <li><strong>Dropout:</strong> Tỷ lệ 0.5</li>
+                            <li><strong>Đầu ra:</strong> Vector đặc trưng 128 chiều</li>
+                        </ul>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Training and Evaluation Pipeline -->
+            <div class="architecture-section">
+                <h2 class="section-title">🚀 Quy Trình Huấn Luyện & Đánh Giá</h2>
+                
+                <div class="training-pipeline">
+                    <div class="pipeline-step">
+                        <div class="step-number">1</div>
+                        <h3>Tải Dữ Liệu</h3>
+                        <p>Tải metadata CSV và hình ảnh chụp tuyến vú</p>
+                    </div>
+                    
+                    <div class="pipeline-step">
+                        <div class="step-number">2</div>
+                        <h3>Tiền Xử Lý</h3>
+                        <p>Mã hóa đặc trưng, chuẩn hóa hình ảnh</p>
+                    </div>
+                    
+                    <div class="pipeline-step">
+                        <div class="step-number">3</div>
+                        <h3>Chia Train/Test</h3>
+                        <p>Chia 80/20 với phân tầng</p>
+                    </div>
+                    
+                    <div class="pipeline-step">
+                        <div class="step-number">4</div>
+                        <h3>Huấn Luyện Mô Hình</h3>
+                        <p>Tối ưu Adam, categorical crossentropy</p>
+                    </div>
+                    
+                    <div class="pipeline-step">
+                        <div class="step-number">5</div>
+                        <h3>Đánh Giá</h3>
+                        <p>Báo cáo phân loại, ma trận nhầm lẫn, đường cong ROC</p>
+                    </div>
+                    
+                    <div class="pipeline-step">
+                        <div class="step-number">6</div>
+                        <h3>Phân Tích Đặc Trưng</h3>
+                        <p>Tầm quan trọng hoán vị để giải thích</p>
+                    </div>
+                </div>
+
+                <div class="code-snippet">
+<strong># Cấu Hình Huấn Luyện Chính:</strong>
+model.compile(
+    optimizer='adam',
+    loss='categorical_crossentropy',
+    metrics=['accuracy']
+)
+
+# Tăng Cường Dữ Liệu cho Hình Ảnh
+datagen = ImageDataGenerator(
+    rotation_range=15,        # Xoay 15 độ
+    width_shift_range=0.1,    # Dịch chuyển ngang 10%
+    height_shift_range=0.1,   # Dịch chuyển dọc 10%
+    zoom_range=0.1,           # Phóng to/thu nhỏ 10%
+    horizontal_flip=True      # Lật ngang
+)
+
+# Dừng Sớm
+early_stopping = tf.keras.callbacks.EarlyStopping(
+    monitor='val_loss',
+    patience=5,
+    restore_best_weights=True
+)
+                </div>
+            </div>
+
+            <!-- Fusion Strategy Analysis -->
+            <div class="fusion-analysis">
+                <h2 class="fusion-title">🔗 Phân Tích Chiến Lược Hợp Nhất Muộn</h2>
+                
+                <div style="background: rgba(255,255,255,0.1); border-radius: 10px; padding: 20px; margin: 20px 0;">
+                    <h3>📍 Vị Trí Hợp Nhất: <span class="highlight">Xử Lý Phía Server</span></h3>
+                    <p>Quá trình hợp nhất diễn ra trên server sau khi cả hai đặc trưng từ bảng và hình ảnh đã được trích xuất và xử lý qua các nhánh mạng thần kinh tương ứng.</p>
+                </div>
+
+                <table class="comparison-table">
+                    <thead>
+                        <tr>
+                            <th>Aspect</th>
+                            <th>Client-Side Fusion</th>
+                            <th>Server-Side Fusion (Current)</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        <tr>
+                            <td><strong>Performance</strong></td>
+                            <td class="cons">Limited by device capabilities</td>
+                            <td class="pros">High-performance GPU/CPU clusters</td>
+                        </tr>
+                        <tr>
+                            <td><strong>Latency</strong></td>
+                            <td class="pros">No network transfer for fusion</td>
+                            <td class="cons">Network latency for data transfer</td>
+                        </tr>
+                        <tr>
+                            <td><strong>Security</strong></td>
+                            <td class="cons">Sensitive medical data on device</td>
+                            <td class="pros">Centralized security controls</td>
+                        </tr>
+                        <tr>
+                            <td><strong>Model Updates</strong></td>
+                            <td class="cons">Requires app updates</td>
+                            <td class="pros">Real-time model deployment</td>
+                        </tr>
+                        <tr>
+                            <td><strong>Scalability</strong></td>
+                            <td class="cons">Device-dependent</td>
+                            <td class="pros">Easy horizontal scaling</td>
+                        </tr>
+                        <tr>
+                            <td><strong>Privacy</strong></td>
+                            <td class="pros">Data stays on device</td>
+                            <td class="cons">Data transmitted to server</td>
+                        </tr>
+                    </tbody>
+                </table>
+
+                <div style="background: rgba(255,255,255,0.1); border-radius: 10px; padding: 20px; margin: 20px 0;">
+                    <h3>✅ Why Server-Side Fusion is Optimal for This System:</h3>
+                    <ul style="text-align: left;">
+                        <li><strong>Medical Grade Accuracy:</strong> Requires powerful hardware for reliable ResNet50 inference</li>
+                        <li><strong>Regulatory Compliance:</strong> Centralized logging and audit trails for medical applications</li>
+                        <li><strong>Model Complexity:</strong> 160-dimensional fusion layer needs substantial computational resources</li>
+                        <li><strong>Continuous Learning:</strong> Server can accumulate and learn from new cases</li>
+                        <li><strong>Expert Validation:</strong> Allows for human expert review and feedback integration</li>
+                    </ul>
+                </div>
+            </div>
+
+            <!-- Implementation Details -->
+            <div class="architecture-section">
+                <h2 class="section-title">⚙️ Implementation Details</h2>
+                
+                <div class="diagram-container">
+                    <h3>🔗 Fusion Layer Implementation</h3>
+                    <div class="code-snippet">
+# Fusion Layer in build_multimodal_model()
+combined = concatenate([x_tab.output, x_img.output])
+
+# Post-fusion processing
+x = Dense(64, activation='relu')(combined)
+x = Dropout(0.3)(x)
+x = Dense(32, activation='relu')(x)
+output = Dense(num_classes, activation='softmax')(x)
+                    </div>
+
+                    <h3>📊 Feature Extraction Summary</h3>
+                    <ul class="layer-list">
+                        <li><strong>Tabular Features:</strong> 32-dimensional vector from clinical metadata</li>
+                        <li><strong>Image Features:</strong> 128-dimensional vector from ResNet50 + Dense layer</li>
+                        <li><strong>Fused Features:</strong> 160-dimensional concatenated vector</li>
+                        <li><strong>Final Classification:</strong> 3-class output (Normal, Benign, Malignant)</li>
+                    </ul>
+                </div>
+            </div>
+        </div>
+    </div>
+</body>
+</html>

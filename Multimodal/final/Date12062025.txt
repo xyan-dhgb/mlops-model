@@ -1,0 +1,11 @@
+Date:12/06/2025
+Trước Late fussion: cần vẽ ra ra chi tiết thêm vài lớp dense cho CSV 
+Sửa lại hình vẽ full mulitmodal model về train đã được thể hiện bên trên Train model và đường dẫn giữa hình ảnh và client
+Sửa lại hình ảnh giữa client và server sao cho phù hợp: Fed Aggregation; Cần xác định trong client có cái gì, cần xác định nguyên lý, lý do tại sao chọn client
+Thêm lưu đồ thuật toán cient server
+Run match:
+Multimodal: 
+	  +chạy centralized 
+	  +or FL cần phân phối các kịch bản IID và non-IID; cần pb horizontal (cân nhắc dữ liệu) 
+multimodal vs unimodal
+Cân mở rộng sample (số lượng trong confusion matrix) cho cái DL để cho ra kết quả khả quan hơn 
