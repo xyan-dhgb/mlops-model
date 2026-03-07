@@ -1,0 +1,91 @@
+# =============================================================
+# .github/workflows/ecr-lifecycle.yml
+# Quản lý vòng đời images trên ECR:
+#   - Xóa images cũ theo policy (giữ tối đa 10 images)
+#   - Chạy hàng tuần vào Chủ Nhật 2:00 AM ICT
+# =============================================================
+
+name: ECR Lifecycle Management
+
+on:
+  schedule:
+    - cron: "0 19 * * 0"  # 2:00 AM ICT (UTC+7) mỗi Chủ Nhật
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: "Dry run (chỉ xem, không xóa)"
+        required: true
+        default: "true"
+        type: boolean
+      keep_count:
+        description: "Giữ lại bao nhiêu images mới nhất"
+        required: true
+        default: "10"
+
+env:
+  AWS_REGION: ap-southeast-1
+
+jobs:
+  cleanup-ecr:
+    name: "🧹 Cleanup old ECR images"
+    runs-on: ubuntu-22.04
+    timeout-minutes: 15
+
+    permissions:
+      id-token: write
+      contents: read
+
+    steps:
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_IAM_ROLE_ARN }}
+          aws-region:     ${{ env.AWS_REGION }}
+
+      - name: Cleanup ECR — giữ 10 images mới nhất
+        run: |
+          DRY_RUN="${{ github.event.inputs.dry_run || 'false' }}"
+          KEEP="${{ github.event.inputs.keep_count || '10' }}"
+
+          REPOS=(
+            "cancer-mlops/preprocessing"
+            "cancer-mlops/training"
+            "cancer-mlops/serving"
+          )
+
+          for REPO in "${REPOS[@]}"; do
+            echo "─── Xử lý repo: $REPO ───"
+
+            # Lấy danh sách images, sort theo ngày push (cũ nhất trước)
+            IMAGES=$(aws ecr describe-images \
+              --repository-name "$REPO" \
+              --region ${{ env.AWS_REGION }} \
+              --query 'sort_by(imageDetails, &imagePushedAt)[*].imageDigest' \
+              --output text 2>/dev/null)
+
+            TOTAL=$(echo "$IMAGES" | wc -w)
+            DELETE_COUNT=$((TOTAL - KEEP))
+
+            echo "  Tổng images: $TOTAL | Giữ lại: $KEEP | Xóa: $DELETE_COUNT"
+
+            if [ "$DELETE_COUNT" -le 0 ]; then
+              echo "  ✅ Không cần xóa"
+              continue
+            fi
+
+            # Lấy $DELETE_COUNT images cũ nhất
+            OLD_DIGESTS=$(echo "$IMAGES" | tr '\t' '\n' | head -$DELETE_COUNT)
+
+            for DIGEST in $OLD_DIGESTS; do
+              if [ "$DRY_RUN" = "true" ]; then
+                echo "  [DRY RUN] Sẽ xóa: $DIGEST"
+              else
+                aws ecr batch-delete-image \
+                  --repository-name "$REPO" \
+                  --image-ids imageDigest="$DIGEST" \
+                  --region ${{ env.AWS_REGION }} \
+                  --output text
+                echo "  🗑️  Đã xóa: $DIGEST"
+              fi
+            done
+          done

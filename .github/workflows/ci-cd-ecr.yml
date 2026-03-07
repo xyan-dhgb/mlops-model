@@ -1,0 +1,724 @@
+# =============================================================
+# .github/workflows/ci-cd-ecr.yml
+# CI/CD Pipeline: Build ML Source → Unit Test → Push to ECR
+# Project: MLOps Cancer Diagnosis - KLTN 2025-2026
+#
+# Trigger:
+#   - Push vào main/develop  → Full CI + ECR push
+#   - Pull Request vào main  → Chỉ CI (không push)
+#   - Manual dispatch        → Chọn service cụ thể
+#
+# Jobs:
+#   1. lint-and-validate     → Ruff lint + type check
+#   2. unit-tests            → Pytest với coverage report
+#   3. integration-tests     → Test với MinIO/MLflow giả lập
+#   4. build-and-push-ecr    → Build Docker + push ECR
+#   5. scan-image            → Trivy security scan
+#   6. notify                → Slack notification
+# =============================================================
+
+name: CI/CD — Build, Test & Push to ECR
+
+on:
+  push:
+    branches:
+      - main
+      - develop
+      - "feature/**"
+      - "hotfix/**"
+    paths-ignore:
+      - "**.md"
+      - "docs/**"
+      - ".gitignore"
+
+  pull_request:
+    branches:
+      - main
+      - develop
+
+  workflow_dispatch:
+    inputs:
+      service:
+        description: "Service cần build (all / preprocessing / training / serving)"
+        required: true
+        default: "all"
+        type: choice
+        options:
+          - all
+          - preprocessing
+          - training
+          - serving
+      push_ecr:
+        description: "Push lên ECR?"
+        required: true
+        default: "true"
+        type: boolean
+      image_tag:
+        description: "Custom image tag (để trống = dùng commit SHA)"
+        required: false
+        default: ""
+
+# =============================================================
+# GLOBAL ENV — Dùng chung cho tất cả jobs
+# =============================================================
+env:
+  AWS_REGION:         ap-southeast-1         # Singapore (gần VN nhất)
+  ECR_REGISTRY:       ${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.ap-southeast-1.amazonaws.com
+  REPO_PREPROCESSING: cancer-mlops/preprocessing
+  REPO_TRAINING:      cancer-mlops/training
+  REPO_SERVING:       cancer-mlops/serving
+  PYTHON_VERSION:     "3.11"
+  POETRY_VERSION:     "1.8.2"
+
+# =============================================================
+# CONCURRENCY — Tránh 2 pipeline chạy song song trên cùng branch
+# =============================================================
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true   # Cancel pipeline cũ khi có push mới
+
+# =============================================================
+# JOB 1: LINT & VALIDATE
+# =============================================================
+jobs:
+  lint-and-validate:
+    name: "🔍 Lint & Type Check"
+    runs-on: ubuntu-22.04
+    timeout-minutes: 10
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0    # Full history cho git blame
+
+      - name: Setup Python ${{ env.PYTHON_VERSION }}
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: "pip"
+
+      - name: Cài lint tools
+        run: |
+          pip install ruff==0.4.4 mypy==1.10.0 bandit==1.7.8
+
+      - name: Ruff — Lint (PEP8 + import order + bugbear)
+        run: |
+          ruff check src/ tests/ \
+            --select E,F,W,I,B,UP \
+            --ignore E501 \
+            --output-format=github
+        # E501 = line length (bỏ qua vì code ML thường dài)
+
+      - name: Ruff — Format check
+        run: ruff format --check src/ tests/
+
+      - name: Mypy — Static type check
+        run: |
+          mypy src/ \
+            --ignore-missing-imports \
+            --no-strict-optional \
+            --python-version 3.11
+        continue-on-error: true  # Warning, không block pipeline
+
+      - name: Bandit — Security scan (source code)
+        run: |
+          bandit -r src/ \
+            -ll \
+            --exclude src/tests \
+            -f json -o bandit-report.json || true
+          
+          # Hiện kết quả readable
+          bandit -r src/ -ll --exclude src/tests || true
+
+      - name: Upload security report
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: bandit-security-report
+          path: bandit-report.json
+
+  # =============================================================
+  # JOB 2: UNIT TESTS
+  # =============================================================
+  unit-tests:
+    name: "🧪 Unit Tests"
+    runs-on: ubuntu-22.04
+    timeout-minutes: 20
+    needs: lint-and-validate
+
+    # Matrix: Test trên nhiều Python versions để đảm bảo compatibility
+    strategy:
+      matrix:
+        python-version: ["3.10", "3.11"]
+      fail-fast: true
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Python ${{ matrix.python-version }}
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+          cache: "pip"
+
+      - name: Cài dependencies
+        run: |
+          pip install -r requirements.txt
+          pip install pytest==8.2.0 pytest-cov==5.0.0 \
+                      pytest-mock==3.14.0 pytest-timeout==2.3.1 \
+                      moto[s3]==5.0.10   # Mock AWS S3/ECR cho unit tests
+
+      - name: Chạy Unit Tests — Preprocessing
+        run: |
+          pytest tests/unit/test_image_preprocessing.py \
+                 tests/unit/test_tabular_preprocessing.py \
+                 tests/unit/test_mlflow_utils.py \
+            -v \
+            --timeout=60 \
+            --tb=short \
+            --cov=src/preprocessing \
+            --cov-report=xml:coverage-preprocessing.xml \
+            --cov-report=term-missing \
+            --junitxml=junit-preprocessing.xml
+
+      - name: Chạy Unit Tests — Model Architecture
+        run: |
+          pytest tests/unit/test_multimodal_model.py \
+                 tests/unit/test_data_loader.py \
+            -v \
+            --timeout=120 \
+            --tb=short \
+            --cov=src/models \
+            --cov-report=xml:coverage-models.xml \
+            --junitxml=junit-models.xml
+
+      - name: Chạy Unit Tests — Serving API
+        run: |
+          pytest tests/unit/test_serving.py \
+            -v \
+            --timeout=30 \
+            --tb=short \
+            --cov=src/serving \
+            --cov-report=xml:coverage-serving.xml \
+            --junitxml=junit-serving.xml
+
+      - name: Kiểm tra coverage threshold (>= 75%)
+        run: |
+          python -c "
+          import xml.etree.ElementTree as ET
+          import sys
+
+          files = [
+            'coverage-preprocessing.xml',
+            'coverage-models.xml',
+            'coverage-serving.xml'
+          ]
+          threshold = 75.0
+
+          for f in files:
+            try:
+              tree = ET.parse(f)
+              root = tree.getroot()
+              coverage = float(root.attrib.get('line-rate', 0)) * 100
+              print(f'{f}: {coverage:.1f}%')
+              if coverage < threshold:
+                print(f'FAIL: {f} coverage {coverage:.1f}% < {threshold}%')
+                sys.exit(1)
+            except FileNotFoundError:
+              print(f'WARNING: {f} not found')
+          print('All coverage checks passed!')
+          "
+
+      - name: Publish Test Results
+        uses: EnricoMi/publish-unit-test-result-action@v2
+        if: always()
+        with:
+          files: "junit-*.xml"
+          comment_title: "Unit Test Results — Python ${{ matrix.python-version }}"
+
+      - name: Upload coverage to Codecov
+        uses: codecov/codecov-action@v4
+        with:
+          files: coverage-preprocessing.xml,coverage-models.xml,coverage-serving.xml
+          flags: python${{ matrix.python-version }}
+          token: ${{ secrets.CODECOV_TOKEN }}
+
+      - name: Upload test artifacts
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: test-results-py${{ matrix.python-version }}
+          path: |
+            junit-*.xml
+            coverage-*.xml
+
+  # =============================================================
+  # JOB 3: INTEGRATION TESTS
+  # =============================================================
+  integration-tests:
+    name: "🔗 Integration Tests"
+    runs-on: ubuntu-22.04
+    timeout-minutes: 30
+    needs: unit-tests
+
+    # Chỉ chạy integration test khi push lên main/develop
+    if: |
+      github.event_name == 'push' &&
+      (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/develop')
+
+    services:
+      # MinIO — Object Storage giả lập S3
+      minio:
+        image: minio/minio:RELEASE.2024-04-06T05-26-02Z
+        env:
+          MINIO_ROOT_USER:     minioadmin
+          MINIO_ROOT_PASSWORD: minioadmin123
+        ports:
+          - 9000:9000
+          - 9001:9001
+        options: >-
+          --health-cmd "curl -f http://localhost:9000/minio/health/live"
+          --health-interval 15s
+          --health-timeout 5s
+          --health-retries 5
+        # Cần chạy với server command
+        # (GitHub Actions service containers dùng default entrypoint)
+
+      # PostgreSQL — MLflow backend
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_DB:       mlflow_db
+          POSTGRES_USER:     mlflow_user
+          POSTGRES_PASSWORD: mlflow_pass_2026
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U mlflow_user -d mlflow_db"
+          --health-interval 10s
+          --health-retries 5
+
+    env:
+      MINIO_ENDPOINT:       http://localhost:9000
+      MINIO_USER:           minioadmin
+      MINIO_PASSWORD:       minioadmin123
+      MLFLOW_TRACKING_URI:  http://localhost:5000
+      AWS_ACCESS_KEY_ID:    minioadmin
+      AWS_SECRET_ACCESS_KEY: minioadmin123
+      MLFLOW_S3_ENDPOINT_URL: http://localhost:9000
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Python ${{ env.PYTHON_VERSION }}
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: "pip"
+
+      - name: Cài dependencies
+        run: pip install -r requirements.txt mlflow==2.11.3
+
+      - name: Khởi động MinIO và tạo buckets
+        run: |
+          # Cài MinIO client
+          wget -q https://dl.min.io/client/mc/release/linux-amd64/mc
+          chmod +x mc && sudo mv mc /usr/local/bin/
+
+          # Đợi MinIO sẵn sàng
+          for i in $(seq 1 30); do
+            curl -sf http://localhost:9000/minio/health/live && break
+            echo "Đợi MinIO... ($i/30)"
+            sleep 3
+          done
+
+          # Tạo buckets
+          mc alias set local http://localhost:9000 minioadmin minioadmin123
+          for bucket in raw-data processed-data mlflow-artifacts mlops-cancer-bucket; do
+            mc mb --ignore-existing local/$bucket
+            echo "✅ Bucket: $bucket"
+          done
+
+      - name: Khởi động MLflow Server
+        run: |
+          pip install mlflow psycopg2-binary boto3
+          mlflow server \
+            --host 0.0.0.0 \
+            --port 5000 \
+            --backend-store-uri postgresql://mlflow_user:mlflow_pass_2026@localhost:5432/mlflow_db \
+            --default-artifact-root s3://mlflow-artifacts/ \
+            --serve-artifacts &
+
+          # Đợi MLflow sẵn sàng
+          for i in $(seq 1 30); do
+            curl -sf http://localhost:5000/health && break
+            echo "Đợi MLflow... ($i/30)"
+            sleep 3
+          done
+          echo "✅ MLflow ready"
+
+      - name: Tạo sample dataset cho integration test
+        run: |
+          python scripts/generate_sample_data.py \
+            --output-dir /tmp/sample_data \
+            --samples-per-class 10 \
+            --seed 42
+
+      - name: Integration Test — Image Preprocessing Pipeline
+        run: |
+          pytest tests/integration/test_image_pipeline.py \
+            -v --timeout=120 \
+            --tb=long \
+            -s    # Show stdout để debug nếu fail
+
+      - name: Integration Test — Tabular Preprocessing Pipeline
+        run: |
+          pytest tests/integration/test_tabular_pipeline.py \
+            -v --timeout=60 \
+            --tb=long
+
+      - name: Integration Test — MLflow Tracking
+        run: |
+          pytest tests/integration/test_mlflow_tracking.py \
+            -v --timeout=60 \
+            --tb=long
+
+      - name: Verify artifacts trên MinIO
+        run: |
+          python scripts/verify_pipeline_outputs.py \
+            --bucket processed-data \
+            --expected-keys \
+              "metadata/train_image_manifest.parquet" \
+              "metadata/val_image_manifest.parquet" \
+              "metadata/test_image_manifest.parquet" \
+              "tabular/train_features.parquet" \
+              "tabular/scaler_params.json" \
+              "metadata/dataset_v0.0.1-test.json"
+
+  # =============================================================
+  # JOB 4: BUILD & PUSH TO ECR
+  # =============================================================
+  build-and-push-ecr:
+    name: "🐳 Build & Push ECR"
+    runs-on: ubuntu-22.04
+    timeout-minutes: 45
+    needs: [unit-tests, integration-tests]
+
+    # Push ECR khi:
+    # - Push lên main hoặc develop
+    # - Manual trigger với push_ecr=true
+    if: |
+      always() &&
+      needs.unit-tests.result == 'success' &&
+      (
+        needs.integration-tests.result == 'success' ||
+        needs.integration-tests.result == 'skipped'
+      ) &&
+      (
+        github.ref == 'refs/heads/main' ||
+        github.ref == 'refs/heads/develop' ||
+        github.event_name == 'workflow_dispatch'
+      )
+
+    # Permissions cho OIDC auth (không cần store AWS keys lâu dài)
+    permissions:
+      id-token: write
+      contents: read
+      packages: write
+
+    # Output image tags để dùng ở jobs sau
+    outputs:
+      image_tag:          ${{ steps.meta.outputs.image_tag }}
+      preprocessing_uri:  ${{ steps.push.outputs.preprocessing_uri }}
+      training_uri:       ${{ steps.push.outputs.training_uri }}
+      serving_uri:        ${{ steps.push.outputs.serving_uri }}
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      # ── Authentication: Dùng OIDC (an toàn hơn long-lived keys) ──
+      - name: Configure AWS credentials (OIDC)
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume:    ${{ secrets.AWS_IAM_ROLE_ARN }}
+          role-session-name: github-actions-ecr-push
+          aws-region:        ${{ env.AWS_REGION }}
+          # OIDC: không cần AWS_ACCESS_KEY_ID / AWS_SECRET_ACCESS_KEY
+
+      - name: Login to Amazon ECR
+        id: login-ecr
+        uses: aws-actions/amazon-ecr-login@v2
+
+      # ── Tạo ECR repos nếu chưa có ──────────────────────────────
+      - name: Đảm bảo ECR repositories tồn tại
+        run: |
+          for repo in \
+            ${{ env.REPO_PREPROCESSING }} \
+            ${{ env.REPO_TRAINING }} \
+            ${{ env.REPO_SERVING }}; do
+            
+            aws ecr describe-repositories \
+              --repository-names "$repo" \
+              --region ${{ env.AWS_REGION }} 2>/dev/null || \
+            aws ecr create-repository \
+              --repository-name "$repo" \
+              --region ${{ env.AWS_REGION }} \
+              --image-scanning-configuration scanOnPush=true \
+              --encryption-configuration encryptionType=AES256 \
+              --tags Key=Project,Value=cancer-mlops Key=Team,Value=KLTN2026
+            
+            echo "✅ Repo: $repo"
+          done
+
+      # ── Tính image tag ──────────────────────────────────────────
+      - name: Tính image tag
+        id: meta
+        run: |
+          # Custom tag từ workflow_dispatch
+          if [ -n "${{ github.event.inputs.image_tag }}" ]; then
+            TAG="${{ github.event.inputs.image_tag }}"
+          
+          # Tag theo branch
+          elif [ "${{ github.ref }}" = "refs/heads/main" ]; then
+            # main → latest + semver từ git tag
+            GIT_TAG=$(git describe --tags --abbrev=0 2>/dev/null || echo "v0.0.0")
+            VERSION="${GIT_TAG#v}"
+            TAG="${VERSION}-${GITHUB_SHA::8}"
+          
+          elif [ "${{ github.ref }}" = "refs/heads/develop" ]; then
+            TAG="dev-${GITHUB_SHA::8}"
+          
+          else
+            # Feature branch
+            BRANCH=$(echo "${{ github.ref_name }}" | sed 's|/|-|g')
+            TAG="branch-${BRANCH}-${GITHUB_SHA::8}"
+          fi
+
+          echo "image_tag=$TAG"      >> $GITHUB_OUTPUT
+          echo "short_sha=${GITHUB_SHA::8}" >> $GITHUB_OUTPUT
+
+          echo "📌 Image tag: $TAG"
+
+      # ── Setup Docker Buildx (multi-platform, cache) ────────────
+      - name: Setup Docker Buildx
+        uses: docker/setup-buildx-action@v3
+        with:
+          platforms: linux/amd64  # EKS nodes thường là amd64
+
+      # ── BUILD & PUSH: Preprocessing Image ──────────────────────
+      - name: Build & Push — Preprocessing
+        id: build-preprocessing
+        if: |
+          github.event.inputs.service == 'all' ||
+          github.event.inputs.service == 'preprocessing' ||
+          github.event.inputs.service == ''
+        uses: docker/build-push-action@v5
+        with:
+          context:     .
+          file:        configs/Dockerfile.preprocessing
+          push:        true
+          tags: |
+            ${{ env.ECR_REGISTRY }}/${{ env.REPO_PREPROCESSING }}:${{ steps.meta.outputs.image_tag }}
+            ${{ env.ECR_REGISTRY }}/${{ env.REPO_PREPROCESSING }}:latest
+          labels: |
+            org.opencontainers.image.title=Cancer MLOps Preprocessing
+            org.opencontainers.image.version=${{ steps.meta.outputs.image_tag }}
+            org.opencontainers.image.revision=${{ github.sha }}
+            org.opencontainers.image.created=${{ github.event.head_commit.timestamp }}
+            project=cancer-mlops
+            component=preprocessing
+          # Layer cache từ ECR để tăng tốc build
+          cache-from: |
+            type=registry,ref=${{ env.ECR_REGISTRY }}/${{ env.REPO_PREPROCESSING }}:buildcache
+          cache-to: |
+            type=registry,ref=${{ env.ECR_REGISTRY }}/${{ env.REPO_PREPROCESSING }}:buildcache,mode=max
+          build-args: |
+            PYTHON_VERSION=${{ env.PYTHON_VERSION }}
+            BUILD_DATE=${{ github.event.head_commit.timestamp }}
+            GIT_COMMIT=${{ github.sha }}
+
+      # ── BUILD & PUSH: Training Image ───────────────────────────
+      - name: Build & Push — Training
+        id: build-training
+        if: |
+          github.event.inputs.service == 'all' ||
+          github.event.inputs.service == 'training' ||
+          github.event.inputs.service == ''
+        uses: docker/build-push-action@v5
+        with:
+          context:  .
+          file:     configs/Dockerfile.training
+          push:     true
+          tags: |
+            ${{ env.ECR_REGISTRY }}/${{ env.REPO_TRAINING }}:${{ steps.meta.outputs.image_tag }}
+            ${{ env.ECR_REGISTRY }}/${{ env.REPO_TRAINING }}:latest
+          labels: |
+            org.opencontainers.image.version=${{ steps.meta.outputs.image_tag }}
+            component=training
+          cache-from: |
+            type=registry,ref=${{ env.ECR_REGISTRY }}/${{ env.REPO_TRAINING }}:buildcache
+          cache-to: |
+            type=registry,ref=${{ env.ECR_REGISTRY }}/${{ env.REPO_TRAINING }}:buildcache,mode=max
+          build-args: |
+            GIT_COMMIT=${{ github.sha }}
+
+      # ── BUILD & PUSH: Serving Image ────────────────────────────
+      - name: Build & Push — Serving
+        id: build-serving
+        if: |
+          github.event.inputs.service == 'all' ||
+          github.event.inputs.service == 'serving' ||
+          github.event.inputs.service == ''
+        uses: docker/build-push-action@v5
+        with:
+          context:  .
+          file:     configs/Dockerfile.serving
+          push:     true
+          tags: |
+            ${{ env.ECR_REGISTRY }}/${{ env.REPO_SERVING }}:${{ steps.meta.outputs.image_tag }}
+            ${{ env.ECR_REGISTRY }}/${{ env.REPO_SERVING }}:latest
+          labels: |
+            org.opencontainers.image.version=${{ steps.meta.outputs.image_tag }}
+            component=serving
+          cache-from: |
+            type=registry,ref=${{ env.ECR_REGISTRY }}/${{ env.REPO_SERVING }}:buildcache
+          cache-to: |
+            type=registry,ref=${{ env.ECR_REGISTRY }}/${{ env.REPO_SERVING }}:buildcache,mode=max
+
+      # ── Lưu URIs vào output ────────────────────────────────────
+      - name: Set image URIs output
+        id: push
+        run: |
+          TAG="${{ steps.meta.outputs.image_tag }}"
+          echo "preprocessing_uri=${{ env.ECR_REGISTRY }}/${{ env.REPO_PREPROCESSING }}:${TAG}" >> $GITHUB_OUTPUT
+          echo "training_uri=${{ env.ECR_REGISTRY }}/${{ env.REPO_TRAINING }}:${TAG}"           >> $GITHUB_OUTPUT
+          echo "serving_uri=${{ env.ECR_REGISTRY }}/${{ env.REPO_SERVING }}:${TAG}"             >> $GITHUB_OUTPUT
+
+          echo "## 🐳 Images đã push lên ECR" >> $GITHUB_STEP_SUMMARY
+          echo "| Service       | URI |" >> $GITHUB_STEP_SUMMARY
+          echo "|---------------|-----|" >> $GITHUB_STEP_SUMMARY
+          echo "| Preprocessing | \`${{ env.ECR_REGISTRY }}/${{ env.REPO_PREPROCESSING }}:${TAG}\` |" >> $GITHUB_STEP_SUMMARY
+          echo "| Training      | \`${{ env.ECR_REGISTRY }}/${{ env.REPO_TRAINING }}:${TAG}\` |" >> $GITHUB_STEP_SUMMARY
+          echo "| Serving       | \`${{ env.ECR_REGISTRY }}/${{ env.REPO_SERVING }}:${TAG}\` |" >> $GITHUB_STEP_SUMMARY
+
+  # =============================================================
+  # JOB 5: SECURITY SCAN (Trivy)
+  # =============================================================
+  scan-images:
+    name: "🔒 Security Scan (Trivy)"
+    runs-on: ubuntu-22.04
+    timeout-minutes: 20
+    needs: build-and-push-ecr
+    if: needs.build-and-push-ecr.result == 'success'
+
+    permissions:
+      security-events: write  # Để upload SARIF to GitHub Security
+      id-token: write
+      contents: read
+
+    strategy:
+      matrix:
+        service: [preprocessing, training, serving]
+
+    steps:
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_IAM_ROLE_ARN }}
+          aws-region:     ${{ env.AWS_REGION }}
+
+      - name: Login to ECR
+        uses: aws-actions/amazon-ecr-login@v2
+
+      - name: Trivy scan — ${{ matrix.service }}
+        uses: aquasecurity/trivy-action@master
+        with:
+          image-ref: >-
+            ${{ env.ECR_REGISTRY }}/cancer-mlops/${{ matrix.service }}:${{ needs.build-and-push-ecr.outputs.image_tag }}
+          format:       sarif
+          output:       trivy-${{ matrix.service }}.sarif
+          severity:     CRITICAL,HIGH
+          exit-code:    "1"        # Fail nếu có CRITICAL vulnerabilities
+          ignore-unfixed: true     # Bỏ qua lỗi chưa có patch
+
+      - name: Upload Trivy SARIF to GitHub Security
+        uses: github/codeql-action/upload-sarif@v3
+        if: always()
+        with:
+          sarif_file:   trivy-${{ matrix.service }}.sarif
+          category:     trivy-${{ matrix.service }}
+
+  # =============================================================
+  # JOB 6: NOTIFY
+  # =============================================================
+  notify:
+    name: "📢 Notify"
+    runs-on: ubuntu-22.04
+    needs: [lint-and-validate, unit-tests, integration-tests, build-and-push-ecr, scan-images]
+    if: always()
+
+    steps:
+      - name: Tổng kết kết quả pipeline
+        run: |
+          echo "## Pipeline Summary" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "| Job | Status |" >> $GITHUB_STEP_SUMMARY
+          echo "|-----|--------|" >> $GITHUB_STEP_SUMMARY
+          echo "| Lint & Validate   | ${{ needs.lint-and-validate.result }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| Unit Tests        | ${{ needs.unit-tests.result }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| Integration Tests | ${{ needs.integration-tests.result }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| Build & Push ECR  | ${{ needs.build-and-push-ecr.result }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| Security Scan     | ${{ needs.scan-images.result }} |" >> $GITHUB_STEP_SUMMARY
+
+      - name: Slack notification — Success
+        if: |
+          needs.build-and-push-ecr.result == 'success' &&
+          needs.scan-images.result == 'success'
+        uses: slackapi/slack-github-action@v1.26.0
+        with:
+          payload: |
+            {
+              "text": "✅ *CI/CD Pipeline THÀNH CÔNG*",
+              "blocks": [
+                {
+                  "type": "section",
+                  "text": {
+                    "type": "mrkdwn",
+                    "text": "✅ *Cancer MLOps CI/CD — Thành công*\n*Branch:* `${{ github.ref_name }}`\n*Commit:* `${{ github.sha }}`\n*Image Tag:* `${{ needs.build-and-push-ecr.outputs.image_tag }}`\n*Actor:* ${{ github.actor }}"
+                  }
+                }
+              ]
+            }
+        env:
+          SLACK_WEBHOOK_URL:  ${{ secrets.SLACK_WEBHOOK_URL }}
+          SLACK_WEBHOOK_TYPE: INCOMING_WEBHOOK
+
+      - name: Slack notification — Failure
+        if: |
+          needs.unit-tests.result == 'failure' ||
+          needs.build-and-push-ecr.result == 'failure' ||
+          needs.scan-images.result == 'failure'
+        uses: slackapi/slack-github-action@v1.26.0
+        with:
+          payload: |
+            {
+              "text": "❌ *CI/CD Pipeline THẤT BẠI*",
+              "blocks": [
+                {
+                  "type": "section",
+                  "text": {
+                    "type": "mrkdwn",
+                    "text": "❌ *Cancer MLOps CI/CD — Thất bại*\n*Branch:* `${{ github.ref_name }}`\n*Commit:* `${{ github.sha }}`\n*Actor:* ${{ github.actor }}\n*Xem chi tiết:* ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+                  }
+                }
+              ]
+            }
+        env:
+          SLACK_WEBHOOK_URL:  ${{ secrets.SLACK_WEBHOOK_URL }}
+          SLACK_WEBHOOK_TYPE: INCOMING_WEBHOOK
