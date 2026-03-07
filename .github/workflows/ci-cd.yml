@@ -1,0 +1,244 @@
+# ──────────────────────────────────────────────────────────────────────────────
+# CI/CD Pipeline – Skin Cancer Multimodal ML
+# Triggers : push / PR  →  main | develop
+# Steps    : lint → unit-test → build Docker image → push to AWS ECR
+# ──────────────────────────────────────────────────────────────────────────────
+
+name: ML CI/CD Pipeline
+
+on:
+  push:
+    branches: [main, develop]
+  pull_request:
+    branches: [main, develop]
+  workflow_dispatch:          # allow manual trigger from GitHub UI
+
+env:
+  # ── AWS / ECR ───────────────────────────────────────────────────────────────
+  AWS_REGION:        ${{ vars.AWS_REGION }}           # e.g. ap-southeast-1
+  ECR_REGISTRY:      ${{ vars.ECR_REGISTRY }}         # e.g. 123456789.dkr.ecr.ap-southeast-1.amazonaws.com
+  ECR_REPOSITORY:    skin-cancer-multimodal           # ECR repo name
+  # ── Image tagging ──────────────────────────────────────────────────────────
+  IMAGE_TAG:         ${{ github.sha }}                # unique tag per commit
+  LATEST_TAG:        latest
+
+# Cancel any in-progress run for the same branch (save CI minutes)
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+# ──────────────────────────────────────────────────────────────────────────────
+jobs:
+
+# ╔══════════════════════════════════════════════════════════════════════════════
+# ║  JOB 1 – Code Quality (lint + type check)
+# ╚══════════════════════════════════════════════════════════════════════════════
+  lint:
+    name: 🔍 Lint & Static Analysis
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout source
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+
+      - name: Install lint tools
+        run: |
+          pip install --upgrade pip
+          pip install flake8 black isort
+
+      - name: Check formatting with Black
+        run: black --check --diff src/ tests/ scripts/
+
+      - name: Check import order with isort
+        run: isort --check-only --diff src/ tests/ scripts/
+
+      - name: Lint with Flake8
+        run: |
+          # E501 = line too long (handled by Black)
+          flake8 src/ tests/ scripts/ \
+            --max-line-length=100 \
+            --extend-ignore=E501,W503 \
+            --statistics
+
+
+# ╔══════════════════════════════════════════════════════════════════════════════
+# ║  JOB 2 – Unit Tests (with coverage report)
+# ╚══════════════════════════════════════════════════════════════════════════════
+  unit-test:
+    name: 🧪 Unit Tests
+    runs-on: ubuntu-latest
+    needs: lint                 # only run if lint passes
+
+    strategy:
+      matrix:
+        python-version: ["3.10", "3.11"]   # test on two Python versions
+
+    steps:
+      - name: Checkout source
+        uses: actions/checkout@v4
+
+      - name: Set up Python ${{ matrix.python-version }}
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+          cache: pip
+
+      - name: Install dependencies
+        run: |
+          pip install --upgrade pip
+          pip install -r requirements.txt
+          pip install pytest pytest-cov
+
+      # Suppress TF GPU warnings to keep logs clean
+      - name: Run unit tests with coverage
+        env:
+          TF_CPP_MIN_LOG_LEVEL: "3"
+          CUDA_VISIBLE_DEVICES: ""          # force CPU
+        run: |
+          pytest tests/ \
+            -v \
+            --tb=short \
+            --cov=src \
+            --cov-report=xml:coverage.xml \
+            --cov-report=term-missing \
+            --cov-fail-under=75           # fail if coverage < 75 %
+
+      - name: Upload coverage report
+        uses: actions/upload-artifact@v4
+        if: matrix.python-version == '3.11'
+        with:
+          name: coverage-report
+          path: coverage.xml
+          retention-days: 14
+
+      # Optional: publish coverage to Codecov
+      # - name: Upload to Codecov
+      #   uses: codecov/codecov-action@v4
+      #   with:
+      #     file: coverage.xml
+      #     token: ${{ secrets.CODECOV_TOKEN }}
+
+
+# ╔══════════════════════════════════════════════════════════════════════════════
+# ║  JOB 3 – Build & Push Docker Image to AWS ECR
+# ║  Only runs on push to main/develop (NOT on PRs)
+# ╚══════════════════════════════════════════════════════════════════════════════
+  build-and-push:
+    name: 🐳 Build & Push to ECR
+    runs-on: ubuntu-latest
+    needs: unit-test
+    # Skip on pull_request events – only push after tests pass on real branches
+    if: github.event_name != 'pull_request'
+
+    permissions:
+      id-token: write      # required for OIDC (keyless auth to AWS)
+      contents: read
+
+    outputs:
+      image_uri: ${{ steps.build-push.outputs.image_uri }}
+
+    steps:
+      - name: Checkout source
+        uses: actions/checkout@v4
+
+      # ── Authenticate to AWS using OIDC (no long-lived keys stored) ──────────
+      - name: Configure AWS credentials (OIDC)
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume:    ${{ secrets.AWS_ROLE_ARN }}
+          aws-region:        ${{ env.AWS_REGION }}
+          role-session-name: GitHubActionsECRPush
+
+      # ── Log in to ECR ────────────────────────────────────────────────────────
+      - name: Login to Amazon ECR
+        id: login-ecr
+        uses: aws-actions/amazon-ecr-login@v2
+
+      # ── Set up Docker Buildx for layer caching ───────────────────────────────
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      # ── Derive image metadata (tags + labels) ────────────────────────────────
+      - name: Docker meta
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.ECR_REGISTRY }}/${{ env.ECR_REPOSITORY }}
+          tags: |
+            type=sha,prefix=sha-
+            type=ref,event=branch
+            type=raw,value=latest,enable=${{ github.ref == 'refs/heads/main' }}
+
+      # ── Build multi-stage Docker image and push ──────────────────────────────
+      - name: Build and push Docker image
+        id: build-push
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          file:    docker/Dockerfile
+          push:    true
+          tags:    ${{ steps.meta.outputs.tags }}
+          labels:  ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha             # GitHub Actions layer cache
+          cache-to:   type=gha,mode=max
+          build-args: |
+            BUILD_DATE=${{ github.event.head_commit.timestamp }}
+            GIT_COMMIT=${{ github.sha }}
+            VERSION=${{ github.ref_name }}
+
+      # ── Output the full image URI ─────────────────────────────────────────────
+      - name: Export image URI
+        run: |
+          echo "image_uri=${{ env.ECR_REGISTRY }}/${{ env.ECR_REPOSITORY }}:sha-${{ env.IMAGE_TAG }}" \
+            >> "$GITHUB_OUTPUT"
+          echo "::notice title=Image pushed::${{ env.ECR_REGISTRY }}/${{ env.ECR_REPOSITORY }}:sha-${{ env.IMAGE_TAG }}"
+
+      # ── Scan image for vulnerabilities (Trivy) ────────────────────────────────
+      - name: Scan image with Trivy
+        uses: aquasecurity/trivy-action@master
+        with:
+          image-ref: ${{ env.ECR_REGISTRY }}/${{ env.ECR_REPOSITORY }}:sha-${{ env.IMAGE_TAG }}
+          format: table
+          exit-code: "0"          # set to "1" to block deploy on CRITICAL CVEs
+          ignore-unfixed: true
+          severity: CRITICAL,HIGH
+
+
+# ╔══════════════════════════════════════════════════════════════════════════════
+# ║  JOB 4 – Notify (Slack / summary) – runs always after build-and-push
+# ╚══════════════════════════════════════════════════════════════════════════════
+  notify:
+    name: 📣 Notify
+    runs-on: ubuntu-latest
+    needs: [build-and-push]
+    if: always() && github.event_name != 'pull_request'
+
+    steps:
+      - name: Post Slack notification
+        if: ${{ vars.SLACK_WEBHOOK_URL != '' }}
+        uses: slackapi/slack-github-action@v1.26.0
+        with:
+          payload: |
+            {
+              "text": "${{ needs.build-and-push.result == 'success' && '✅' || '❌' }} *Skin Cancer ML Pipeline* – `${{ github.ref_name }}` @ `${{ github.sha }}`\n*Status:* ${{ needs.build-and-push.result }}\n*Image:* `${{ needs.build-and-push.outputs.image_uri }}`\n*Triggered by:* ${{ github.actor }}"
+            }
+        env:
+          SLACK_WEBHOOK_URL:  ${{ vars.SLACK_WEBHOOK_URL }}
+          SLACK_WEBHOOK_TYPE: INCOMING_WEBHOOK
+
+      - name: Write job summary
+        run: |
+          echo "## 🩺 Skin Cancer ML – Pipeline Summary" >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          echo "| Field | Value |" >> "$GITHUB_STEP_SUMMARY"
+          echo "|---|---|" >> "$GITHUB_STEP_SUMMARY"
+          echo "| Branch | \`${{ github.ref_name }}\` |" >> "$GITHUB_STEP_SUMMARY"
+          echo "| Commit | \`${{ github.sha }}\` |" >> "$GITHUB_STEP_SUMMARY"
+          echo "| Build status | ${{ needs.build-and-push.result }} |" >> "$GITHUB_STEP_SUMMARY"
+          echo "| Image URI | \`${{ needs.build-and-push.outputs.image_uri }}\` |" >> "$GITHUB_STEP_SUMMARY"
+          echo "| Triggered by | ${{ github.actor }} |" >> "$GITHUB_STEP_SUMMARY"
