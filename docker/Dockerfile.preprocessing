@@ -1,0 +1,43 @@
+# ── Dockerfile.preprocessing ─────────────────────────────────────────────────
+# Lightweight image for data preprocessing & feature engineering.
+# Uses pandas, numpy, scikit-learn — no heavy GPU framework needed here.
+# ─────────────────────────────────────────────────────────────────────────────
+
+ARG PYTHON_VERSION=3.11
+ARG BUILD_SHA=unknown
+
+# ── Stage 1: builder ──────────────────────────────────────────────────────────
+FROM python:${PYTHON_VERSION}-slim AS builder
+
+WORKDIR /build
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    gcc g++ \
+    && rm -rf /var/lib/apt/lists/*
+
+COPY requirements-preprocessing.txt .
+RUN pip install --upgrade pip \
+    && pip install --prefix=/install --no-cache-dir -r requirements-preprocessing.txt
+
+# ── Stage 2: runtime ──────────────────────────────────────────────────────────
+FROM python:${PYTHON_VERSION}-slim AS runtime
+
+ARG BUILD_SHA
+ENV BUILD_SHA=${BUILD_SHA} \
+    PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1 \
+    PYTHONPATH=/app
+
+WORKDIR /app
+
+COPY --from=builder /install /usr/local
+COPY src/preprocessing/ ./src/preprocessing/
+
+RUN useradd --no-create-home --shell /bin/false mluser \
+    && chown -R mluser:mluser /app
+USER mluser
+
+LABEL org.opencontainers.image.revision=${BUILD_SHA} \
+      org.opencontainers.image.title="mlops-preprocessing"
+
+ENTRYPOINT ["python", "-m", "src.preprocessing.run"]

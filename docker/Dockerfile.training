@@ -1,0 +1,50 @@
+# ── Dockerfile.training ──────────────────────────────────────────────────────
+# TensorFlow/Keras training image.
+# Uses official TensorFlow GPU base — swap to tensorflow-cpu tag for CPU-only.
+# ─────────────────────────────────────────────────────────────────────────────
+
+ARG TF_VERSION=2.16.1
+ARG PYTHON_VERSION=3.11
+ARG BUILD_SHA=unknown
+
+# ── Stage 1: install extra deps on top of TF base ────────────────────────────
+FROM tensorflow/tensorflow:${TF_VERSION}-gpu AS builder
+
+WORKDIR /build
+
+# Keep apt layer small
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    git curl \
+    && rm -rf /var/lib/apt/lists/*
+
+COPY requirements-training.txt .
+RUN pip install --upgrade pip \
+    && pip install --prefix=/install --no-cache-dir -r requirements-training.txt
+
+# ── Stage 2: runtime ──────────────────────────────────────────────────────────
+FROM tensorflow/tensorflow:${TF_VERSION}-gpu AS runtime
+
+ARG BUILD_SHA
+ENV BUILD_SHA=${BUILD_SHA} \
+    PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1 \
+    PYTHONPATH=/app \
+    TF_CPP_MIN_LOG_LEVEL=2
+
+WORKDIR /app
+
+COPY --from=builder /install /usr/local
+COPY src/training/ ./src/training/
+COPY src/shared/   ./src/shared/     
+
+# Non-root user
+RUN useradd --no-create-home --shell /bin/false mluser \
+    && chown -R mluser:mluser /app
+USER mluser
+
+LABEL org.opencontainers.image.revision=${BUILD_SHA} \
+      org.opencontainers.image.title="mlops-training" \
+      framework="tensorflow"
+
+# Example: python -m src.training.run --config configs/experiment.yaml
+ENTRYPOINT ["python", "-m", "src.training.run"]
