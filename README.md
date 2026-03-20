@@ -1,4 +1,4 @@
-# 🩺 Skin Cancer Multimodal ML – CI/CD Pipeline
+# Skin Cancer Multimodal ML – CI/CD Pipeline
 
 > **Dataset**: [Skin Cancer – Kaggle](https://www.kaggle.com/datasets/mahdavi1202/skin-cancer)  
 > **Model**: Multimodal CNN (image branch) + Dense (EHR/tabular branch) fused with TensorFlow/Keras  
@@ -7,32 +7,48 @@
 
 ---
 
-## 📁 Project Structure
+## Project Structure
 
 ```
-skin-cancer-cicd/
-├── .github/
-│   └── workflows/
-│       └── ci-cd.yml           # ← Main pipeline definition
-├── src/
-│   ├── __init__.py
-│   ├── data_preprocessing.py   # Load, clean, encode, split data
-│   ├── model.py                # Multimodal CNN architecture
-│   └── train.py                # Training, evaluation, inference
-├── tests/
-│   ├── test_data_preprocessing.py
-│   ├── test_model.py
-│   └── test_train.py
-├── scripts/
-│   └── run_train.py            # Docker entrypoint
-├── docker/
-│   └── Dockerfile              # Multi-stage build
-└── requirements.txt
+mlops-model/
+  .github/workflows/
+    mlops-pipeline.yml         ← Pipeline CI/CD 6 job
+  docker/mlflow/
+    docker-compose.yml          ← Stack cục bộ: Postgres + MinIO + MLflow
+    k8s-mlflow.yaml             ← Manifest Kubernetes (namespace mlops)
+    .env.example                ← Mẫu biến môi trường
+  Multimodal/
+    config/train_config.yaml    ← Siêu tham số huấn luyện
+    data/raw/                   ← Ảnh ISIC + CSV (gitignored)
+    data_loader/dataloader.py   ← build_dataloaders()
+    final/                      ← Checkpoint + artifact preprocessor
+    models/multimodal_model.py  ← EfficientNet-B3 + MLP + FocalLoss
+    preprocessing/
+      image_preprocessing.py   ← Loại bỏ lông, chuẩn hóa màu, augmentation
+      tabular_preprocessing.py ← MetadataPreprocessor, tạo fold
+    training/train.py           ← Vòng lặp huấn luyện + ghi log MLflow
+    utils/
+      xrai_explainer.py         ← XRAI + GradCAM
+      shap_explainer.py         ← SHAP + MultimodalXAIRunner
+    requirement.txt
+  src/
+    data_preprocessing.py       ← Xác thực hash + điều phối pipeline (CLI)
+    model.py                    ← Nạp mô hình + đánh giá adversarial + MLflow signature
+    train.py                    ← Điều phối pipeline đầy đủ
+  scripts/
+    run_train.py                ← Entry point chính (CLI)
+  tests/
+    conftest.py
+    test_data_preprocessing.py
+    test_model.py
+    test_train.py
+  README.md
+
 ```
 
 ---
 
-## ⚙️ Pipeline Overview
+## Pipeline Overview
 
 ```
 Push / PR
@@ -68,25 +84,27 @@ Push / PR
 
 ---
 
-## 🔑 Required Secrets & Variables
+## Required Secrets & Variables
 
 Configure these in **Settings → Secrets and variables → Actions**:
 
 ### Secrets (`Settings → Secrets`)
-| Secret | Description |
-|---|---|
+
+| Secret         | Description                                                                                               |
+| -------------- | --------------------------------------------------------------------------------------------------------- |
 | `AWS_ROLE_ARN` | ARN of the IAM role GitHub Actions assumes via OIDC (e.g. `arn:aws:iam::123456789:role/GitHubActionsECR`) |
 
 ### Variables (`Settings → Variables`)
-| Variable | Example value |
-|---|---|
-| `AWS_REGION` | `ap-southeast-1` |
-| `ECR_REGISTRY` | `123456789.dkr.ecr.ap-southeast-1.amazonaws.com` |
-| `SLACK_WEBHOOK_URL` | `https://hooks.slack.com/...` (optional) |
+
+| Variable            | Example value                                    |
+| ------------------- | ------------------------------------------------ |
+| `AWS_REGION`        | `ap-southeast-1`                                 |
+| `ECR_REGISTRY`      | `123456789.dkr.ecr.ap-southeast-1.amazonaws.com` |
+| `SLACK_WEBHOOK_URL` | `https://hooks.slack.com/...` (optional)         |
 
 ---
 
-## 🔐 AWS IAM Setup (OIDC – no long-lived keys)
+## AWS IAM Setup (OIDC – no long-lived keys)
 
 ```bash
 # 1. Create OIDC provider for GitHub in AWS
@@ -105,19 +123,24 @@ aws ecr create-repository \
 ```
 
 **Trust policy for the IAM role** (`trust-policy.json`):
+
 ```json
 {
   "Version": "2012-10-17",
-  "Statement": [{
-    "Effect": "Allow",
-    "Principal": { "Federated": "arn:aws:iam::<ACCOUNT_ID>:oidc-provider/token.actions.githubusercontent.com" },
-    "Action": "sts:AssumeRoleWithWebIdentity",
-    "Condition": {
-      "StringLike": {
-        "token.actions.githubusercontent.com:sub": "repo:<ORG>/<REPO>:ref:refs/heads/*"
+  "Statement": [
+    {
+      "Effect": "Allow",
+      "Principal": {
+        "Federated": "arn:aws:iam::<ACCOUNT_ID>:oidc-provider/token.actions.githubusercontent.com"
+      },
+      "Action": "sts:AssumeRoleWithWebIdentity",
+      "Condition": {
+        "StringLike": {
+          "token.actions.githubusercontent.com:sub": "repo:<ORG>/<REPO>:ref:refs/heads/*"
+        }
       }
     }
-  }]
+  ]
 }
 ```
 
@@ -125,7 +148,7 @@ aws ecr create-repository \
 
 ---
 
-## 🧪 Running Tests Locally
+## Running Tests Locally
 
 ```bash
 # Install deps
@@ -140,7 +163,7 @@ pytest tests/test_model.py -v
 
 ---
 
-## 🐳 Building the Docker Image Locally
+## Building the Docker Image Locally
 
 ```bash
 docker build -f docker/Dockerfile -t skin-cancer-ml:local .
@@ -156,14 +179,14 @@ docker run --rm \
 
 ---
 
-## 📊 Dataset Columns (metadata.csv)
+## Dataset Columns (metadata.csv)
 
-| Column | Description |
-|---|---|
-| `img_id` | Image filename |
-| `diagnostic` | Target label: BCC / MEL / SCC / … |
-| `age` | Patient age |
-| `fitspatrick` | Fitzpatrick skin type (1–6) |
-| `diameter_1/2` | Lesion diameter (mm) |
-| `region` | Body region |
-| `gender` | Patient gender |
+| Column         | Description                       |
+| -------------- | --------------------------------- |
+| `img_id`       | Image filename                    |
+| `diagnostic`   | Target label: BCC / MEL / SCC / … |
+| `age`          | Patient age                       |
+| `fitspatrick`  | Fitzpatrick skin type (1–6)       |
+| `diameter_1/2` | Lesion diameter (mm)              |
+| `region`       | Body region                       |
+| `gender`       | Patient gender                    |

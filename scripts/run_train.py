@@ -1,110 +1,129 @@
-#!/usr/bin/env python3
 """
-Entrypoint script for training the Skin Cancer Multimodal model.
+scripts/run_train.py
+Main entry point for training runs — called by CI/CD and manually.
 
-Environment variables
----------------------
-DATA_DIR        : path to dataset root (must contain metadata.csv + all_images/)
-MODEL_OUTPUT    : where to save the final .h5 model  (default: /app/output/model.h5)
-EPOCHS          : training epochs                     (default: 20)
-BATCH_SIZE      : batch size                          (default: 32)
-IMAGE_SIZE      : comma-separated H,W e.g. 224,224   (default: 224,224)
+Usage:
+    # Default config
+    python scripts/run_train.py
+
+    # Custom config
+    python scripts/run_train.py --config Multimodal/config/train_config.yaml
+
+    # Override specific params
+    python scripts/run_train.py --fold 1 --epochs 50 --batch-size 64
+
+    # Full pipeline (preprocessing + training)
+    python scripts/run_train.py --full-pipeline --csv data/meta.csv --image-dir data/images/
 """
 
-import json
-import os
+import argparse
+import logging
 import sys
+import yaml
+from pathlib import Path
 
-import numpy as np
+sys.path.insert(0, str(Path(__file__).parent.parent))
 
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
+from Multimodal.training.train import train, DEFAULT_CONFIG
 
-from src.data_preprocessing import (
-    load_csv_data,
-    preprocess_csv_data,
-    prepare_multimodal_data,
-    split_dataset,
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s | %(levelname)s | %(message)s",
+    datefmt="%Y-%m-%d %H:%M:%S",
 )
-from src.model import build_multimodal_model, get_model_summary
-from src.train import train_model, evaluate_model
+log = logging.getLogger(__name__)
 
 
-# ── Config from environment ─────────────────────────────────────────────────
-DATA_DIR = os.getenv("DATA_DIR", "/data")
-MODEL_OUTPUT = os.getenv("MODEL_OUTPUT", "/app/output/model.h5")
-EPOCHS = int(os.getenv("EPOCHS", "20"))
-BATCH_SIZE = int(os.getenv("BATCH_SIZE", "32"))
-_img_size = os.getenv("IMAGE_SIZE", "224,224").split(",")
-IMAGE_SIZE = (int(_img_size[0]), int(_img_size[1]))
+def parse_args():
+    parser = argparse.ArgumentParser(description="Train Multimodal Skin Cancer Model")
 
-CSV_PATH = os.path.join(DATA_DIR, "metadata.csv")
-IMAGE_DIR = os.path.join(DATA_DIR, "all_images")
-CHECKPOINT_DIR = os.path.join(os.path.dirname(MODEL_OUTPUT), "checkpoints")
-LOG_DIR = os.path.join(os.path.dirname(MODEL_OUTPUT), "logs")
-METRICS_PATH = os.path.join(os.path.dirname(MODEL_OUTPUT), "metrics.json")
+    # Config file (base)
+    parser.add_argument("--config", type=str, default=None,
+                        help="Path to YAML config (overrides defaults)")
+
+    # Data args
+    parser.add_argument("--csv",       type=str, default=None)
+    parser.add_argument("--image-dir", type=str, default=None)
+    parser.add_argument("--fold",      type=int, default=None,
+                        help="Validation fold index 0-4")
+
+    # Training args
+    parser.add_argument("--epochs",     type=int,   default=None)
+    parser.add_argument("--batch-size", type=int,   default=None)
+    parser.add_argument("--lr",         type=float, default=None)
+    parser.add_argument("--device",     type=str,   default=None,
+                        choices=["cuda", "cpu"])
+
+    # MLflow
+    parser.add_argument("--mlflow-uri",  type=str, default=None)
+    parser.add_argument("--run-name",    type=str, default=None)
+    parser.add_argument("--experiment",  type=str, default=None)
+
+    # Pipeline mode
+    parser.add_argument("--full-pipeline", action="store_true",
+                        help="Run preprocessing + training end-to-end")
+
+    return parser.parse_args()
+
+
+def build_config(args) -> dict:
+    """Merge DEFAULT_CONFIG ← YAML ← CLI args (CLI has highest priority)."""
+    cfg = DEFAULT_CONFIG.copy()
+
+    # Load YAML
+    if args.config:
+        path = Path(args.config)
+        if not path.exists():
+            log.error("Config file not found: %s", args.config)
+            sys.exit(1)
+        with open(path) as f:
+            yaml_cfg = yaml.safe_load(f)
+        cfg.update(yaml_cfg)
+        log.info("Loaded config from %s", args.config)
+
+    # CLI overrides
+    overrides = {
+        "csv_path":            args.csv,
+        "image_dir":           args.image_dir,
+        "fold":                args.fold,
+        "num_epochs":          args.epochs,
+        "batch_size":          args.batch_size,
+        "lr":                  args.lr,
+        "device":              args.device,
+        "mlflow_tracking_uri": args.mlflow_uri,
+        "run_name":            args.run_name,
+        "experiment_name":     args.experiment,
+    }
+    for k, v in overrides.items():
+        if v is not None:
+            cfg[k] = v
+            log.info("CLI override: %s = %s", k, v)
+
+    return cfg
 
 
 def main():
-    print("=" * 60)
-    print("  Skin Cancer Multimodal Classification – Training")
-    print("=" * 60)
+    args   = parse_args()
+    cfg    = build_config(args)
 
-    # 1. Load & preprocess metadata
-    print("\n[1/5] Loading and preprocessing CSV data …")
-    df = load_csv_data(CSV_PATH)
-    df, report = preprocess_csv_data(df)
-    print(f"      Shape: {report['final_shape']}  |  Missing: {report['missing_after']}")
+    log.info("=" * 60)
+    log.info("Multimodal Skin Cancer Training")
+    log.info("  Experiment : %s", cfg["experiment_name"])
+    log.info("  Run name   : %s", cfg["run_name"])
+    log.info("  Fold       : %d / 5-fold CV", cfg["fold"])
+    log.info("  Epochs     : %d", cfg["num_epochs"])
+    log.info("  Batch size : %d", cfg["batch_size"])
+    log.info("  Device     : %s", cfg["device"])
+    log.info("  MLflow URI : %s", cfg["mlflow_tracking_uri"])
+    log.info("=" * 60)
 
-    # 2. Build multimodal arrays
-    print("\n[2/5] Preparing multimodal data (images + tabular) …")
-    X_tabular, X_image, y, label_encoder = prepare_multimodal_data(
-        df, IMAGE_DIR, target_size=IMAGE_SIZE
-    )
-    print(f"      Tabular: {X_tabular.shape}  |  Image: {X_image.shape}  |  Labels: {len(y)}")
+    if args.full_pipeline:
+        from src.train import full_pipeline
+        full_pipeline(cfg)
+    else:
+        train(cfg)
 
-    # 3. Split
-    print("\n[3/5] Splitting dataset …")
-    splits = split_dataset(X_tabular, X_image, y)
-    print(
-        f"      Train={len(splits['y_train'])}  Val={len(splits['y_val'])}  "
-        f"Test={len(splits['y_test'])}"
-    )
-
-    # 4. Build & train
-    print("\n[4/5] Building and training model …")
-    num_classes = len(np.unique(y))
-    model = build_multimodal_model(
-        tabular_shape=splits["X_tab_train"].shape[1:],
-        image_shape=splits["X_img_train"].shape[1:],
-        num_classes=num_classes,
-    )
-    print(get_model_summary(model))
-
-    os.makedirs(os.path.dirname(MODEL_OUTPUT), exist_ok=True)
-    train_model(
-        model,
-        splits["X_tab_train"], splits["X_img_train"], splits["y_train"],
-        splits["X_tab_val"],   splits["X_img_val"],   splits["y_val"],
-        epochs=EPOCHS,
-        batch_size=BATCH_SIZE,
-        checkpoint_dir=CHECKPOINT_DIR,
-        log_dir=LOG_DIR,
-    )
-
-    # 5. Evaluate & save
-    print("\n[5/5] Evaluating on test set and saving model …")
-    metrics = evaluate_model(
-        model,
-        splits["X_tab_test"], splits["X_img_test"], splits["y_test"],
-    )
-    print(f"      Test Loss: {metrics['loss']:.4f}  |  Test Accuracy: {metrics['accuracy']:.4f}")
-
-    model.save(MODEL_OUTPUT)
-    print(f"\n✅  Model saved to: {MODEL_OUTPUT}")
-
-    with open(METRICS_PATH, "w") as f:
-        json.dump(metrics, f, indent=2)
-    print(f"✅  Metrics saved to: {METRICS_PATH}")
+    log.info("Done.")
 
 
 if __name__ == "__main__":

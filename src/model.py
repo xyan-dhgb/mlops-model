@@ -1,114 +1,164 @@
 """
-Multimodal CNN model for Skin Cancer Classification.
-Combines image branch (CNN) with tabular branch (Dense) and fuses them.
+src/model.py
+Model registry helpers: load from MLflow, save checkpoints, adversarial eval.
+Used by training scripts and serving layer.
 """
 
-import tensorflow as tf
-from tensorflow.keras.models import Model
-from tensorflow.keras.layers import (
-    Input,
-    Dense,
-    Dropout,
-    Flatten,
-    Conv2D,
-    MaxPooling2D,
-    BatchNormalization,
-    GlobalAveragePooling2D,
-    Concatenate,
-)
+import logging
+from pathlib import Path
+from typing import Optional
+
+import torch
+import mlflow.pytorch
+
+from Multimodal.models.multimodal_model import MultimodalSkinClassifier
+
+log = logging.getLogger(__name__)
 
 
-def build_image_branch(image_shape: tuple[int, int, int]) -> tuple:
-    """
-    Lightweight CNN branch for processing skin lesion images.
-
-    Architecture: Conv → BN → Pool → Conv → BN → Pool → GAP
-    """
-    image_input = Input(shape=image_shape, name="image_input")
-
-    x = Conv2D(32, (3, 3), activation="relu", padding="same")(image_input)
-    x = BatchNormalization()(x)
-    x = MaxPooling2D((2, 2))(x)
-    x = Dropout(0.25)(x)
-
-    x = Conv2D(64, (3, 3), activation="relu", padding="same")(x)
-    x = BatchNormalization()(x)
-    x = MaxPooling2D((2, 2))(x)
-    x = Dropout(0.25)(x)
-
-    x = Conv2D(128, (3, 3), activation="relu", padding="same")(x)
-    x = BatchNormalization()(x)
-    x = GlobalAveragePooling2D()(x)
-    image_features = Dropout(0.5)(x)
-
-    return image_input, image_features
-
-
-def build_tabular_branch(tabular_shape: tuple[int]) -> tuple:
-    """
-    Dense branch for processing tabular / EHR features.
-    """
-    tabular_input = Input(shape=tabular_shape, name="tabular_input")
-
-    x = Dense(64, activation="relu")(tabular_input)
-    x = BatchNormalization()(x)
-    x = Dropout(0.3)(x)
-
-    x = Dense(32, activation="relu")(x)
-    tabular_features = Dropout(0.3)(x)
-
-    return tabular_input, tabular_features
-
-
-def build_multimodal_model(
-    tabular_shape: tuple[int],
-    image_shape: tuple[int, int, int],
-    num_classes: int = 3,
-    learning_rate: float = 1e-4,
-) -> Model:
-    """
-    Fuse image and tabular branches and return a compiled Keras model.
-
-    Parameters
-    ----------
-    tabular_shape  : e.g. (4,)
-    image_shape    : e.g. (224, 224, 3)
-    num_classes    : number of diagnostic classes
-    learning_rate  : Adam LR
-
-    Returns
-    -------
-    model : compiled tf.keras.Model
-    """
-    image_input, image_features = build_image_branch(image_shape)
-    tabular_input, tabular_features = build_tabular_branch(tabular_shape)
-
-    # Fusion
-    fused = Concatenate(name="fusion")([image_features, tabular_features])
-    x = Dense(128, activation="relu")(fused)
-    x = Dropout(0.4)(x)
-    x = Dense(64, activation="relu")(x)
-    x = Dropout(0.3)(x)
-
-    output = Dense(num_classes, activation="softmax", name="output")(x)
-
-    model = Model(
-        inputs=[image_input, tabular_input],
-        outputs=output,
-        name="SkinCancerMultimodal",
+# ─────────────────────────────────────────────
+# Model Loading
+# ─────────────────────────────────────────────
+def load_model_from_checkpoint(
+    checkpoint_path: str,
+    num_classes: int = 7,
+    metadata_input_dim: int = 5,
+    device: str = "cpu",
+) -> MultimodalSkinClassifier:
+    """Load model weights from a local .pt checkpoint."""
+    model = MultimodalSkinClassifier(
+        num_classes=num_classes,
+        metadata_input_dim=metadata_input_dim,
+        pretrained=False,
     )
-
-    model.compile(
-        optimizer=tf.keras.optimizers.Adam(learning_rate=learning_rate),
-        loss="sparse_categorical_crossentropy",
-        metrics=["accuracy"],
-    )
-
+    state = torch.load(checkpoint_path, map_location=device)
+    model.load_state_dict(state)
+    model.to(device).eval()
+    log.info("Loaded checkpoint from %s", checkpoint_path)
     return model
 
 
-def get_model_summary(model: Model) -> str:
-    """Return the model summary as a string."""
-    lines: list[str] = []
-    model.summary(print_fn=lambda line: lines.append(line))
-    return "\n".join(lines)
+def load_model_from_mlflow(
+    model_uri: str,
+    device: str = "cpu",
+) -> MultimodalSkinClassifier:
+    """
+    Load registered model from MLflow Registry.
+    model_uri examples:
+      - "models:/multimodal_skin_cancer_v1/Production"
+      - "runs:/<run_id>/model"
+    """
+    model = mlflow.pytorch.load_model(model_uri, map_location=device)
+    model.to(device).eval()
+    log.info("Loaded model from MLflow: %s", model_uri)
+    return model
+
+
+# ─────────────────────────────────────────────
+# Adversarial Robustness Evaluation
+# SecMLOps: FGSM + PGD before production deploy
+# ─────────────────────────────────────────────
+def fgsm_attack(
+    image: torch.Tensor,
+    epsilon: float,
+    gradient: torch.Tensor,
+) -> torch.Tensor:
+    """Fast Gradient Sign Method perturbation."""
+    return torch.clamp(image + epsilon * gradient.sign(), 0, 1)
+
+
+@torch.enable_grad()
+def evaluate_adversarial_robustness(
+    model: MultimodalSkinClassifier,
+    images: torch.Tensor,
+    metadata: torch.Tensor,
+    labels: torch.Tensor,
+    epsilon: float = 0.03,
+    pgd_steps: int = 10,
+    pgd_alpha: float = 0.007,
+    device: str = "cpu",
+) -> dict:
+    """
+    Evaluate model robustness against FGSM and PGD attacks.
+    Results should be logged to MLflow before production registration.
+
+    Args:
+        epsilon   : max L-inf perturbation (0.03 = ~8/255 for normalized images)
+        pgd_steps : PGD iterations
+        pgd_alpha : PGD step size
+
+    Returns dict with:
+        clean_acc, fgsm_acc, pgd_acc, robustness_gap
+    """
+    model.eval()
+    dev    = torch.device(device)
+    images = images.to(dev).float()
+    meta   = metadata.to(dev).float()
+    labels = labels.to(dev)
+
+    criterion = torch.nn.CrossEntropyLoss()
+
+    # Clean accuracy
+    with torch.no_grad():
+        clean_logits = model(images, meta)
+        clean_acc = (clean_logits.argmax(1) == labels).float().mean().item()
+
+    # FGSM
+    imgs_adv = images.clone().requires_grad_(True)
+    loss = criterion(model(imgs_adv, meta), labels)
+    loss.backward()
+    fgsm_imgs = fgsm_attack(images, epsilon, imgs_adv.grad)
+    with torch.no_grad():
+        fgsm_acc = (model(fgsm_imgs, meta).argmax(1) == labels).float().mean().item()
+
+    # PGD
+    pgd_imgs = images.clone() + torch.empty_like(images).uniform_(-epsilon, epsilon)
+    pgd_imgs = torch.clamp(pgd_imgs, 0, 1)
+    for _ in range(pgd_steps):
+        pgd_imgs.requires_grad_(True)
+        loss = criterion(model(pgd_imgs, meta), labels)
+        loss.backward()
+        with torch.no_grad():
+            pgd_imgs = pgd_imgs + pgd_alpha * pgd_imgs.grad.sign()
+            pgd_imgs = torch.clamp(pgd_imgs, images - epsilon, images + epsilon)
+            pgd_imgs = torch.clamp(pgd_imgs, 0, 1)
+    with torch.no_grad():
+        pgd_acc = (model(pgd_imgs, meta).argmax(1) == labels).float().mean().item()
+
+    results = {
+        "clean_accuracy":    round(clean_acc, 4),
+        "fgsm_accuracy":     round(fgsm_acc,  4),
+        "pgd_accuracy":      round(pgd_acc,   4),
+        "robustness_gap":    round(clean_acc - pgd_acc, 4),
+        "epsilon":           epsilon,
+        "pgd_steps":         pgd_steps,
+    }
+    log.info("Adversarial eval: %s", results)
+    return results
+
+
+# ─────────────────────────────────────────────
+# Model Signature for MLflow
+# ─────────────────────────────────────────────
+def get_mlflow_signature():
+    """
+    MLflow model signature for validation at serving time.
+    Input: image (float32 tensor) + metadata (float32 tensor)
+    Output: class probabilities
+    """
+    try:
+        from mlflow.models.signature import ModelSignature
+        from mlflow.types.schema import Schema, TensorSpec
+        import numpy as np
+
+        input_schema = Schema([
+            TensorSpec(np.dtype("float32"), (-1, 3, 224, 224), "image"),
+            TensorSpec(np.dtype("float32"), (-1, 5),           "metadata"),
+        ])
+        output_schema = Schema([
+            TensorSpec(np.dtype("float32"), (-1, 7), "class_probabilities"),
+        ])
+        return ModelSignature(inputs=input_schema, outputs=output_schema)
+    except Exception as e:
+        log.warning("Could not build MLflow signature: %s", e)
+        return None

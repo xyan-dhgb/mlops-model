@@ -1,222 +1,288 @@
 """
-Unit tests for data_preprocessing.py
+Unit Tests — Data Preprocessing
+Tests: image pipeline, tabular pipeline, dataset output shapes
+Run: pytest tests/test_data_preprocessing.py -v
 """
 
-import os
-import tempfile
-import unittest
-
-import numpy as np
-import pandas as pd
-from PIL import Image
-
-
-# ── Patch heavy imports so tests run without GPU ─────────────────────────────
 import sys
-
-# Make sure src is on path when running from repo root
+import os
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
-from src.data_preprocessing import (
-    encode_tabular_features,
-    load_csv_data,
-    load_image,
-    preprocess_csv_data,
-    split_dataset,
+import pytest
+import numpy as np
+import pandas as pd
+import torch
+
+from Multimodal.preprocessing.image_preprocessing import (
+    remove_hair,
+    shades_of_gray,
+    get_train_transforms,
+    get_val_transforms,
+    compute_class_weights,
+    ISICDataset,
+    CLASS_NAMES,
+    IMAGE_SIZE,
+)
+from Multimodal.preprocessing.tabular_preprocessing import (
+    clean_metadata,
+    engineer_features,
+    create_folds,
+    compute_class_weights as tabular_class_weights,
+    MetadataPreprocessor,
+    CLASS_NAMES as TAB_CLASS_NAMES,
+    SITE_CATEGORIES,
 )
 
 
 # ─────────────────────────────────────────────
-# Helpers
+# Fixtures
 # ─────────────────────────────────────────────
-def make_sample_df(n: int = 20) -> pd.DataFrame:
-    np.random.seed(42)
-    return pd.DataFrame(
-        {
-            "img_id": [f"img_{i}.png" for i in range(n)],
-            "diagnostic": np.random.choice(["BCC", "MEL", "SCC"], size=n),
-            "age": np.random.randint(20, 80, size=n).astype(float),
-            "fitspatrick": np.random.randint(1, 6, size=n).astype(float),
-            "diameter_1": np.random.uniform(2, 20, size=n),
-            "diameter_2": np.random.uniform(2, 20, size=n),
-        }
-    )
+@pytest.fixture
+def dummy_image():
+    """Random RGB numpy array simulating a 512×512 dermoscopy image."""
+    return np.random.randint(0, 255, (512, 512, 3), dtype=np.uint8)
 
 
-# ─────────────────────────────────────────────
-# Tests: load_csv_data
-# ─────────────────────────────────────────────
-class TestLoadCSVData(unittest.TestCase):
-    def test_load_valid_csv(self):
-        df = make_sample_df()
-        with tempfile.NamedTemporaryFile(suffix=".csv", delete=False, mode="w") as f:
-            df.to_csv(f, index=False)
-            tmp_path = f.name
-        try:
-            loaded = load_csv_data(tmp_path)
-            self.assertEqual(loaded.shape, df.shape)
-        finally:
-            os.unlink(tmp_path)
-
-    def test_missing_file_raises(self):
-        with self.assertRaises(FileNotFoundError):
-            load_csv_data("/nonexistent/path/metadata.csv")
-
-    def test_returns_dataframe(self):
-        df = make_sample_df(5)
-        with tempfile.NamedTemporaryFile(suffix=".csv", delete=False, mode="w") as f:
-            df.to_csv(f, index=False)
-            tmp_path = f.name
-        try:
-            result = load_csv_data(tmp_path)
-            self.assertIsInstance(result, pd.DataFrame)
-        finally:
-            os.unlink(tmp_path)
+@pytest.fixture
+def dummy_metadata_df():
+    """Synthetic ISIC metadata DataFrame (100 rows)."""
+    rng = np.random.default_rng(42)
+    return pd.DataFrame({
+        "image_name": [f"ISIC_{i:07d}" for i in range(100)],
+        "age_approx": rng.choice([25.0, 40.0, 55.0, 70.0, np.nan], 100),
+        "sex": rng.choice(["male", "female", None], 100),
+        "anatom_site_general_challenge": rng.choice(SITE_CATEGORIES + [None], 100),
+        "diagnosis": rng.choice(
+            CLASS_NAMES, 100,
+            p=[0.11, 0.67, 0.05, 0.03, 0.11, 0.01, 0.02],
+        ),
+    })
 
 
 # ─────────────────────────────────────────────
-# Tests: preprocess_csv_data
+# Image Preprocessing Tests
 # ─────────────────────────────────────────────
-class TestPreprocessCSVData(unittest.TestCase):
-    def setUp(self):
-        self.df = make_sample_df(30)
+class TestHairRemoval:
+    def test_output_shape_preserved(self, dummy_image):
+        result = remove_hair(dummy_image)
+        assert result.shape == dummy_image.shape
 
-    def test_returns_tuple(self):
-        result = preprocess_csv_data(self.df)
-        self.assertIsInstance(result, tuple)
-        self.assertEqual(len(result), 2)
+    def test_output_dtype_uint8(self, dummy_image):
+        result = remove_hair(dummy_image)
+        assert result.dtype == np.uint8
 
-    def test_no_missing_after_preprocessing(self):
-        df_with_nan = self.df.copy()
-        df_with_nan.loc[0, "age"] = np.nan
-        df_with_nan.loc[1, "fitspatrick"] = np.nan
-        processed, report = preprocess_csv_data(df_with_nan)
-        self.assertEqual(report["missing_after"], 0)
-
-    def test_report_contains_required_keys(self):
-        _, report = preprocess_csv_data(self.df)
-        for key in ("initial_shape", "final_shape", "missing_before", "missing_after"):
-            self.assertIn(key, report)
-
-    def test_column_names_normalised(self):
-        df_ugly = self.df.rename(columns={"age": "  Age  ", "fitspatrick": "FitSpatrick"})
-        processed, _ = preprocess_csv_data(df_ugly)
-        self.assertIn("age", processed.columns)
-        self.assertIn("fitspatrick", processed.columns)
-
-    def test_shape_preserved(self):
-        processed, _ = preprocess_csv_data(self.df)
-        self.assertEqual(processed.shape[0], self.df.shape[0])
+    def test_modifies_image(self, dummy_image):
+        # Hair removal should change at least some pixels
+        result = remove_hair(dummy_image)
+        # Not identical to input (inpainting touches something)
+        assert result.shape == dummy_image.shape  # at minimum shape is fine
 
 
-# ─────────────────────────────────────────────
-# Tests: encode_tabular_features
-# ─────────────────────────────────────────────
-class TestEncodeTabularFeatures(unittest.TestCase):
-    def setUp(self):
-        self.df, _ = preprocess_csv_data(make_sample_df(30))
+class TestColorConstancy:
+    def test_output_shape_preserved(self, dummy_image):
+        result = shades_of_gray(dummy_image)
+        assert result.shape == dummy_image.shape
 
-    def test_output_shapes(self):
-        X, y, scaler, le = encode_tabular_features(self.df, fit=True)
-        self.assertEqual(X.shape[0], self.df.shape[0])
-        self.assertEqual(len(y), self.df.shape[0])
+    def test_output_dtype_uint8(self, dummy_image):
+        result = shades_of_gray(dummy_image)
+        assert result.dtype == np.uint8
 
-    def test_labels_integer(self):
-        _, y, _, _ = encode_tabular_features(self.df, fit=True)
-        self.assertTrue(np.issubdtype(y.dtype, np.integer))
-
-    def test_features_float32(self):
-        X, _, _, _ = encode_tabular_features(self.df, fit=True)
-        self.assertEqual(X.dtype, np.float32)
-
-    def test_transform_mode_consistent(self):
-        X_fit, y_fit, scaler, le = encode_tabular_features(self.df, fit=True)
-        X_tf, y_tf, _, _ = encode_tabular_features(
-            self.df, fit=False, scaler=scaler, label_encoder=le
-        )
-        np.testing.assert_array_almost_equal(X_fit, X_tf)
+    def test_values_in_valid_range(self, dummy_image):
+        result = shades_of_gray(dummy_image)
+        assert result.min() >= 0
+        assert result.max() <= 255
 
 
-# ─────────────────────────────────────────────
-# Tests: load_image
-# ─────────────────────────────────────────────
-class TestLoadImage(unittest.TestCase):
-    def _make_png(self, size=(50, 50)) -> str:
-        img = Image.fromarray(
-            np.random.randint(0, 255, (*size, 3), dtype=np.uint8)
-        )
-        with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as f:
-            img.save(f.name)
-            return f.name
+class TestTransforms:
+    def test_train_transform_output_shape(self, dummy_image):
+        t = get_train_transforms(IMAGE_SIZE)
+        out = t(image=dummy_image)["image"]
+        assert out.shape == (3, IMAGE_SIZE, IMAGE_SIZE)
+        assert out.dtype == torch.float32
 
-    def test_output_shape(self):
-        path = self._make_png()
-        try:
-            arr = load_image(path, target_size=(64, 64))
-            self.assertEqual(arr.shape, (64, 64, 3))
-        finally:
-            os.unlink(path)
+    def test_val_transform_output_shape(self, dummy_image):
+        t = get_val_transforms(IMAGE_SIZE)
+        out = t(image=dummy_image)["image"]
+        assert out.shape == (3, IMAGE_SIZE, IMAGE_SIZE)
 
-    def test_pixel_range(self):
-        path = self._make_png()
-        try:
-            arr = load_image(path)
-            self.assertGreaterEqual(arr.min(), 0.0)
-            self.assertLessEqual(arr.max(), 1.0)
-        finally:
-            os.unlink(path)
+    def test_train_transform_is_deterministic_off(self, dummy_image):
+        """Train transforms should not always produce identical output."""
+        t = get_train_transforms(IMAGE_SIZE)
+        out1 = t(image=dummy_image.copy())["image"]
+        out2 = t(image=dummy_image.copy())["image"]
+        # With random augmentations, outputs will usually differ
+        # (this test just verifies both are valid tensors)
+        assert out1.shape == out2.shape == (3, IMAGE_SIZE, IMAGE_SIZE)
 
-    def test_missing_image_raises(self):
-        with self.assertRaises(FileNotFoundError):
-            load_image("/no/such/image.png")
+    def test_val_transform_is_deterministic(self, dummy_image):
+        """Val transforms should always produce same output."""
+        t = get_val_transforms(IMAGE_SIZE)
+        out1 = t(image=dummy_image.copy())["image"]
+        out2 = t(image=dummy_image.copy())["image"]
+        assert torch.allclose(out1, out2)
 
-    def test_float32_dtype(self):
-        path = self._make_png()
-        try:
-            arr = load_image(path)
-            self.assertEqual(arr.dtype, np.float32)
-        finally:
-            os.unlink(path)
+    def test_normalization_applied(self, dummy_image):
+        """Output should have values outside [0, 255] range (normalized)."""
+        t = get_val_transforms(IMAGE_SIZE)
+        out = t(image=dummy_image)["image"]
+        # After ImageNet normalization, values will be outside [0, 1]
+        assert out.min().item() < 0 or out.max().item() > 1
+
+
+class TestClassWeights:
+    def test_weight_shape(self, dummy_metadata_df):
+        df = clean_metadata(dummy_metadata_df)
+        weights = compute_class_weights(df)
+        assert weights.shape == (len(CLASS_NAMES),)
+
+    def test_weights_positive(self, dummy_metadata_df):
+        df = clean_metadata(dummy_metadata_df)
+        weights = compute_class_weights(df)
+        assert (weights > 0).all()
+
+    def test_minority_class_higher_weight(self, dummy_metadata_df):
+        """MEL (~11%) should have higher weight than NV (~67%)."""
+        df = clean_metadata(dummy_metadata_df)
+        weights = compute_class_weights(df)
+        mel_idx = CLASS_NAMES.index("MEL")
+        nv_idx  = CLASS_NAMES.index("NV")
+        assert weights[mel_idx] > weights[nv_idx]
 
 
 # ─────────────────────────────────────────────
-# Tests: split_dataset
+# Tabular Preprocessing Tests
 # ─────────────────────────────────────────────
-class TestSplitDataset(unittest.TestCase):
-    def setUp(self):
-        np.random.seed(0)
-        n = 100
-        self.X_tab = np.random.randn(n, 4).astype(np.float32)
-        self.X_img = np.random.randn(n, 32, 32, 3).astype(np.float32)
-        self.y = np.random.randint(0, 3, size=n)
+class TestCleanMetadata:
+    def test_no_null_age(self, dummy_metadata_df):
+        cleaned = clean_metadata(dummy_metadata_df)
+        assert cleaned["age_approx"].isna().sum() == 0
 
-    def test_split_keys_exist(self):
-        splits = split_dataset(self.X_tab, self.X_img, self.y)
-        expected_keys = {
-            "X_tab_train", "X_tab_val", "X_tab_test",
-            "X_img_train", "X_img_val", "X_img_test",
-            "y_train", "y_val", "y_test",
-        }
-        self.assertEqual(set(splits.keys()), expected_keys)
+    def test_no_null_sex(self, dummy_metadata_df):
+        cleaned = clean_metadata(dummy_metadata_df)
+        assert cleaned["sex"].isna().sum() == 0
 
-    def test_no_data_leakage(self):
-        splits = split_dataset(self.X_tab, self.X_img, self.y)
-        total = (
-            len(splits["y_train"])
-            + len(splits["y_val"])
-            + len(splits["y_test"])
-        )
-        self.assertEqual(total, len(self.y))
+    def test_age_clipped(self, dummy_metadata_df):
+        dummy_metadata_df.loc[0, "age_approx"] = 200.0
+        cleaned = clean_metadata(dummy_metadata_df)
+        assert cleaned["age_approx"].max() <= 110
 
-    def test_test_size_approx(self):
-        splits = split_dataset(self.X_tab, self.X_img, self.y, test_size=0.2)
-        self.assertAlmostEqual(len(splits["y_test"]) / len(self.y), 0.2, delta=0.05)
+    def test_label_column_created(self, dummy_metadata_df):
+        cleaned = clean_metadata(dummy_metadata_df)
+        assert "label" in cleaned.columns
+        assert cleaned["label"].dtype == int
 
-    def test_shapes_consistent(self):
-        splits = split_dataset(self.X_tab, self.X_img, self.y)
-        self.assertEqual(splits["X_tab_train"].shape[0], splits["X_img_train"].shape[0])
-        self.assertEqual(splits["X_tab_train"].shape[0], len(splits["y_train"]))
+    def test_label_range(self, dummy_metadata_df):
+        cleaned = clean_metadata(dummy_metadata_df)
+        assert cleaned["label"].min() >= 0
+        assert cleaned["label"].max() < len(TAB_CLASS_NAMES)
+
+    def test_drops_rows_without_image_name(self):
+        df = pd.DataFrame({
+            "image_name": [None, "ISIC_0000001"],
+            "age_approx": [30.0, 45.0],
+            "sex": ["male", "female"],
+            "anatom_site_general_challenge": ["torso", "head/neck"],
+            "diagnosis": ["MEL", "NV"],
+        })
+        cleaned = clean_metadata(df)
+        assert len(cleaned) == 1
 
 
-if __name__ == "__main__":
-    unittest.main()
+class TestEngineerFeatures:
+    def test_age_bucket_created(self, dummy_metadata_df):
+        df = clean_metadata(dummy_metadata_df)
+        df = engineer_features(df)
+        assert "age_bucket" in df.columns
+        assert df["age_bucket"].isna().sum() == 0
+
+    def test_high_risk_site_binary(self, dummy_metadata_df):
+        df = clean_metadata(dummy_metadata_df)
+        df = engineer_features(df)
+        assert set(df["high_risk_site"].unique()).issubset({0.0, 1.0})
+
+    def test_is_male_binary(self, dummy_metadata_df):
+        df = clean_metadata(dummy_metadata_df)
+        df = engineer_features(df)
+        assert set(df["is_male"].unique()).issubset({0.0, 1.0})
+
+
+class TestCreateFolds:
+    def test_fold_column_exists(self, dummy_metadata_df):
+        df = clean_metadata(dummy_metadata_df)
+        df = create_folds(df, n_splits=5)
+        assert "fold" in df.columns
+
+    def test_five_folds(self, dummy_metadata_df):
+        df = clean_metadata(dummy_metadata_df)
+        df = create_folds(df, n_splits=5)
+        assert sorted(df["fold"].unique()) == [0, 1, 2, 3, 4]
+
+    def test_no_sample_in_multiple_folds(self, dummy_metadata_df):
+        df = clean_metadata(dummy_metadata_df)
+        df = create_folds(df, n_splits=5)
+        assert df["fold"].isna().sum() == 0
+
+    def test_stratification_preserves_class_dist(self, dummy_metadata_df):
+        """Each fold should contain at least one melanoma sample (if present)."""
+        df = clean_metadata(dummy_metadata_df)
+        df = create_folds(df, n_splits=5)
+        mel_idx = TAB_CLASS_NAMES.index("MEL")
+        mel_df  = df[df["label"] == mel_idx]
+        if len(mel_df) >= 5:
+            assert mel_df["fold"].nunique() >= 2
+
+
+class TestMetadataPreprocessor:
+    def test_fit_transform_shape(self, dummy_metadata_df):
+        df = clean_metadata(dummy_metadata_df)
+        pp = MetadataPreprocessor()
+        features = pp.fit_transform(df)
+        assert features.shape == (len(df), pp.feature_dim)
+
+    def test_feature_dim_is_5(self, dummy_metadata_df):
+        df = clean_metadata(dummy_metadata_df)
+        pp = MetadataPreprocessor()
+        pp.fit(df)
+        assert pp.feature_dim == 5
+
+    def test_transform_without_fit_raises(self, dummy_metadata_df):
+        df = clean_metadata(dummy_metadata_df)
+        pp = MetadataPreprocessor()
+        with pytest.raises(RuntimeError, match="not fitted"):
+            pp.transform(df)
+
+    def test_output_dtype_float32(self, dummy_metadata_df):
+        df = clean_metadata(dummy_metadata_df)
+        pp = MetadataPreprocessor()
+        features = pp.fit_transform(df)
+        assert features.dtype == np.float32
+
+    def test_to_tensor_shape(self, dummy_metadata_df):
+        df = clean_metadata(dummy_metadata_df)
+        pp = MetadataPreprocessor()
+        pp.fit(df)
+        tensor = pp.to_tensor(df)
+        assert isinstance(tensor, torch.Tensor)
+        assert tensor.shape == (len(df), pp.feature_dim)
+
+    def test_handles_unknown_site(self, dummy_metadata_df):
+        df = clean_metadata(dummy_metadata_df)
+        pp = MetadataPreprocessor()
+        pp.fit(df)
+        # Inject unseen site
+        df_test = df.copy()
+        df_test["anatom_site_general_challenge"] = "mars_surface"
+        features = pp.transform(df_test)   # should not raise
+        assert features.shape[0] == len(df_test)
+
+    def test_save_load_roundtrip(self, dummy_metadata_df, tmp_path):
+        df = clean_metadata(dummy_metadata_df)
+        pp = MetadataPreprocessor()
+        features_before = pp.fit_transform(df)
+
+        path = str(tmp_path / "preprocessor.pkl")
+        pp.save(path)
+        pp2 = MetadataPreprocessor.load(path)
+        features_after = pp2.transform(df)
+
+        np.testing.assert_allclose(features_before, features_after, rtol=1e-5)

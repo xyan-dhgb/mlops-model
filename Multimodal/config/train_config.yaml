@@ -1,0 +1,177 @@
+# =============================================================================
+# train_config.yaml — Cấu hình huấn luyện Multimodal Skin Cancer Detection
+# Mô hình: EfficientNet-B3 (ảnh) + MetadataMLP (metadata) — Late Fusion
+# Bộ dữ liệu: ISIC 2024 — 10.015 ảnh dermoscopy, 7 lớp bệnh
+#
+# Cách dùng:
+#   python scripts/run_train.py --config Multimodal/config/train_config.yaml
+#   python scripts/run_train.py --config Multimodal/config/train_config.yaml --fold 1
+# =============================================================================
+
+# ─────────────────────────────────────────────────────────────────────────────
+# MLflow — Theo dõi thí nghiệm
+# ─────────────────────────────────────────────────────────────────────────────
+experiment_name: "multimodal_skin_cancer_2026"
+
+# run_name tự động gắn fold ở scripts/run_train.py khi dùng --fold
+# Ví dụ kết quả: "efficientnet_b3_focal_fold0", "efficientnet_b3_focal_fold1"
+run_name: "efficientnet_b3_focal"
+
+# URI của MLflow tracking server
+# - Local (docker-compose):        "http://localhost:5000"
+# - EKS (trong cluster):           "http://mlflow-service.mlops.svc.cluster.local:5000"
+# - EKS (kubectl port-forward):    "http://localhost:5000"
+mlflow_tracking_uri: "http://localhost:5000"
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Dữ liệu — Đường dẫn
+# ─────────────────────────────────────────────────────────────────────────────
+
+# File CSV metadata gốc ISIC 2019
+# (sau bước preprocess được thay bằng outputs/preprocessing/metadata_with_folds.csv)
+csv_path: "Multimodal/data/raw/ISIC_2019_Training_Metadata.csv"
+
+# Thư mục chứa ảnh .jpg — tên file khớp với cột image_name trong CSV
+image_dir: "Multimodal/data/raw/ISIC_2019_Training_Input"
+
+# Fold kiểm định (0–4) trong 5-fold Stratified Cross-Validation
+# Fold này làm val, 4 fold còn lại làm train
+# Ghi đè từ CLI: --fold 1
+fold: 0
+
+# Đường dẫn preprocessor đã fit sẵn
+# null  = fit preprocessor mới trên train split của fold hiện tại
+# path  = dùng lại preprocessor từ lần chạy trước (khuyến nghị cho fold 1–4)
+preprocessor_path: null
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Tiền xử lý ảnh (image_preprocessing.py)
+# ─────────────────────────────────────────────────────────────────────────────
+
+# Kích thước resize — EfficientNet-B3 mặc định 224x224
+image_size: 224
+
+# Loại bỏ lông bằng DullRazor (morphological blackhat + INPAINT_TELEA)
+apply_hair_removal: true
+
+# Chuẩn hóa màu sắc Shades of Gray (power=6) — triệt tiêu sai lệch ánh sáng
+apply_color_constancy: true
+
+# ─────────────────────────────────────────────────────────────────────────────
+# DataLoader (dataloader.py)
+# ─────────────────────────────────────────────────────────────────────────────
+
+# Số mẫu mỗi batch
+# Gợi ý theo GPU: A100=128, RTX3090=64, T4(Colab/EKS)=32, CPU=8
+batch_size: 32
+
+# Số worker song song cho DataLoader (0 = main process, tốt cho debug)
+num_workers: 4
+
+# WeightedRandomSampler — oversample lớp thiểu số (melanoma ~11%)
+# true: phối hợp cùng Focal Loss để xử lý mất cân bằng tốt hơn
+# false: phụ thuộc hoàn toàn vào Focal Loss + class weights
+use_weighted_sampler: true
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Siêu tham số huấn luyện (train.py)
+# ─────────────────────────────────────────────────────────────────────────────
+
+# Tổng số epoch
+# Kiểm thử nhanh: 10 | Huấn luyện đầy đủ: 30 | Cross-val tốt nhất: 50
+num_epochs: 30
+
+# Learning rate ban đầu cho AdamW
+# EfficientNet-B3 pretrained: 1e-4 là điểm khởi đầu được khuyến nghị
+lr: 0.0001
+
+# Weight decay (L2 regularization) cho AdamW
+weight_decay: 0.0001
+
+# Gamma cho Focal Loss
+# 0 = Cross-Entropy thông thường | 2 = khuyến nghị (RetinaNet paper)
+# Tăng gamma → focus mạnh hơn vào hard examples (melanoma khó phân loại)
+gamma_focal: 2.0
+
+# T_max cho CosineAnnealingLR (thường bằng num_epochs)
+# Giảm xuống để dùng warm restart (Cosine Annealing with Restarts)
+scheduler_t_max: 30
+
+# Gradient clipping — tránh gradient exploding khi fine-tune backbone lớn
+grad_clip_norm: 1.0
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Kiến trúc mô hình (multimodal_model.py)
+# ─────────────────────────────────────────────────────────────────────────────
+
+# Số lớp đầu ra: MEL, NV, BCC, AKIEC, BKL, DF, VASC
+num_classes: 7
+
+# Số chiều đầu vào nhánh metadata
+# Vector 5 chiều: [age_norm, is_male, high_risk_site, age_bucket, site_encoded]
+metadata_input_dim: 5
+
+# Dùng trọng số ImageNet pretrained cho EfficientNet-B3
+pretrained: true
+
+# Freeze BatchNorm trong backbone (khuyến nghị khi batch_size < 16)
+freeze_bn: false
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Phần cứng
+# ─────────────────────────────────────────────────────────────────────────────
+
+# Thiết bị huấn luyện — tự động fallback về "cpu" nếu CUDA không khả dụng
+device: "cuda"
+
+# Automatic Mixed Precision (FP16) — tăng tốc ~1.5–2x, giảm VRAM ~40%
+use_amp: true
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Checkpoint & lưu kết quả
+# ─────────────────────────────────────────────────────────────────────────────
+
+# Thư mục lưu checkpoint (.pt) và preprocessor artifact (.pkl)
+save_dir: "Multimodal/final"
+
+# Chỉ số dùng để chọn checkpoint tốt nhất
+# Khuyến nghị: "val/auc_roc_macro" (ổn định với dataset mất cân bằng)
+# Lựa chọn khác: "val/balanced_accuracy" | "val/f1_macro" | "val/f1_MEL"
+best_metric: "val/auc_roc_macro"
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Pipeline đầy đủ — chỉ dùng với cờ --full-pipeline (src/train.py)
+# ─────────────────────────────────────────────────────────────────────────────
+
+# Thư mục lưu các artifact từ bước tiền xử lý
+# (metadata_with_folds.csv, class_weights.pt, preprocessor.pkl, validation_report.json)
+preprocess_output: "outputs/preprocessing"
+
+# File manifest JSON chứa hash SHA-256 của từng ảnh huấn luyện
+# null       = bỏ qua kiểm tra tính toàn vẹn dữ liệu
+# "path/..." = bật SecMLOps hash validation (chống Data Poisoning Attack)
+hash_manifest: null
+
+# Số fold cho StratifiedKFold trong bước tiền xử lý
+n_folds: 5
+
+# Seed ngẫu nhiên — đảm bảo tái tạo kết quả (reproducibility)
+seed: 42
+
+# ─────────────────────────────────────────────────────────────────────────────
+# XAI — Giải thích mô hình (utils/xrai_explainer.py + shap_explainer.py)
+# ─────────────────────────────────────────────────────────────────────────────
+
+# Sinh XRAI heatmap sau validation (tốn thêm ~20% thời gian mỗi epoch)
+# Khuyến nghị: false trong training, true khi đánh giá mô hình cuối cùng
+generate_xrai: false
+
+# Tính SHAP values cho nhánh metadata sau validation
+generate_shap: false
+
+# Top-k đặc trưng SHAP đính kèm vào API response của KServe
+shap_top_k: 3
+
+# Dùng XRAI fast mode (xấp xỉ nhanh hơn, phù hợp serving)
+# false = full mode (chính xác hơn, dùng khi đánh giá offline)
+xrai_fast_mode: true
