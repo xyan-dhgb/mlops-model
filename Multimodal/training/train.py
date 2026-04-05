@@ -1,409 +1,302 @@
 """
-train.py — Vòng lặp huấn luyện Multimodal Skin Cancer Detection (ISIC 2024)
-
-Thay đổi so với ISIC 2019:
-  - Task        : Binary (logit đơn, BCEWithLogitsLoss) thay vì 7-class softmax
-  - Loss        : BinaryFocalLoss + pos_weight (~33 cho malignant ~3%)
-  - Metric chính: pAUC (partial AUC tại TPR ≥ 0.80) theo đúng Kaggle ISIC 2024
-  - Metric phụ  : AUC-ROC, Balanced Accuracy, F1-binary
-  - DataLoader  : nhận hdf5_path thay vì image_dir
-  - best_metric : val/pauc (thay vì val/auc_roc_macro)
-
-Cách dùng:
-    python scripts/run_train.py --config Multimodal/config/train_config.yaml
-    python scripts/run_train.py --config Multimodal/config/train_config.yaml --fold 1
+Training pipeline for ISIC 2024 multimodal model.
+Includes: class-weight balancing, callbacks, evaluation, GradCAM, SHAP.
 """
 
-import argparse
-import time
-import yaml
-from pathlib import Path
-
 import numpy as np
-import torch
-import torch.nn as nn
-from torch.optim import AdamW
-from torch.optim.lr_scheduler import CosineAnnealingLR
-from sklearn.metrics import (
-    balanced_accuracy_score,
-    roc_auc_score,
-    f1_score,
-)
+import tensorflow as tf
+import matplotlib.pyplot as plt
+import cv2
 import mlflow
-import mlflow.pytorch
-import pandas as pd
 
-from Multimodal.models.multimodal_model import MultimodalSkinClassifier, BinaryFocalLoss
-from Multimodal.data_loader.dataloader import build_dataloaders
-from Multimodal.preprocessing.tabular_preprocessing import (
-    clean_metadata,
-    compute_pos_weight,
+from sklearn.metrics import (
+    accuracy_score, roc_auc_score, classification_report,
+    confusion_matrix, roc_curve, auc
 )
+from sklearn.utils.class_weight import compute_class_weight
+from tensorflow.keras.callbacks import EarlyStopping, ModelCheckpoint, ReduceLROnPlateau
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# Config mặc định — ISIC 2024
-# ─────────────────────────────────────────────────────────────────────────────
-DEFAULT_CONFIG = {
-    "experiment_name":     "multimodal_skin_cancer_isic2024",
-    "run_name":            "efficientnet_b3_binary_fold0",
-    "csv_path":            "Multimodal/data/raw/train-metadata.csv",
-    "hdf5_path":           "Multimodal/data/raw/train-image.hdf5",
-    "fold":                0,
-    "num_epochs":          30,
-    "batch_size":          32,
-    "lr":                  1e-4,
-    "weight_decay":        1e-4,
-    "gamma_focal":         2.0,
-    "focal_alpha":         0.25,
-    "num_workers":         4,
-    "device":              "cuda",
-    "use_amp":             True,
-    "save_dir":            "Multimodal/final",
-    "best_metric":         "val/pauc",
-    "pauc_min_tpr":        0.80,       # pAUC tại TPR ≥ 80% theo Kaggle ISIC 2024
-    "grad_clip_norm":      1.0,
-    "scheduler_t_max":     30,
-    "mlflow_tracking_uri": "http://localhost:5000",
-    "num_classes":         1,
-    "metadata_input_dim":  9,
-    "pretrained":          True,
-    "freeze_bn":           False,
-    "use_weighted_sampler": True,
-    "image_size":          224,
-    "apply_hair_removal":  False,
-    "apply_color_constancy": True,
-    "preprocessor_path":   None,
-    "n_folds":             5,
-    "seed":                42,
-}
+# ── Training ──────────────────────────────────────────────────────────────────
 
-
-# ─────────────────────────────────────────────────────────────────────────────
-# pAUC — metric chính của ISIC 2024
-# ─────────────────────────────────────────────────────────────────────────────
-def compute_pauc(
-    y_true: np.ndarray,
-    y_score: np.ndarray,
-    min_tpr: float = 0.80,
-) -> float:
+def train_model(
+    model,
+    X_tab_train: np.ndarray,
+    X_img_train: np.ndarray,
+    y_train: np.ndarray,
+    X_tab_val: np.ndarray,
+    X_img_val: np.ndarray,
+    y_val: np.ndarray,
+    epochs: int = 20,
+    batch_size: int = 32,
+    checkpoint_path: str = "Multimodal/final/best_model.h5"
+):
     """
-    Tính partial AUC (pAUC) tại vùng TPR ≥ min_tpr.
-    Đây là metric chính thức của Kaggle ISIC 2024 Challenge.
-
-    pAUC = diện tích dưới ROC curve trong khoảng FPR tương ứng với TPR ≥ min_tpr,
-    chuẩn hóa về [0, 1] bằng cách chia cho chiều rộng vùng.
-
-    Args:
-        y_true   : nhãn binary (0/1)
-        y_score  : xác suất malignant (sau sigmoid)
-        min_tpr  : ngưỡng TPR tối thiểu (0.80 theo ISIC 2024)
+    Train the multimodal model with class-weight balancing and callbacks.
 
     Returns:
-        pAUC trong [0, 1]
+        Keras History object.
     """
-    if len(np.unique(y_true)) < 2:
-        return 0.0
+    # Balanced class weights (ISIC 2024 is heavily imbalanced)
+    class_weights = compute_class_weight(
+        "balanced", classes=np.unique(y_train), y=y_train
+    )
+    class_weight_dict = dict(enumerate(class_weights))
+    print(f"Class weights: {class_weight_dict}")
 
-    from sklearn.metrics import roc_curve
-    fpr, tpr, _ = roc_curve(y_true, y_score)
+    callbacks = [
+        EarlyStopping(monitor="val_auc", patience=5,
+                      restore_best_weights=True, mode="max"),
+        ModelCheckpoint(checkpoint_path, monitor="val_auc",
+                        save_best_only=True, mode="max", verbose=1),
+        ReduceLROnPlateau(monitor="val_loss", factor=0.5,
+                          patience=3, min_lr=1e-6, verbose=1),
+    ]
 
-    # Tìm ngưỡng FPR tương ứng với TPR = min_tpr (nội suy)
-    # Vùng tính pAUC: FPR thuộc [0, fpr_at_min_tpr]
-    if tpr[0] >= min_tpr:
-        # Toàn bộ curve nằm trong vùng tính
-        fpr_at_min_tpr = fpr[0]
+    history = model.fit(
+        {"image_input": X_img_train, "tabular_input": X_tab_train},
+        y_train,
+        validation_data=(
+            {"image_input": X_img_val, "tabular_input": X_tab_val},
+            y_val,
+        ),
+        epochs=epochs,
+        batch_size=batch_size,
+        callbacks=callbacks,
+        class_weight=class_weight_dict,
+        verbose=1,
+    )
+    return history
+
+
+# ── Evaluation ────────────────────────────────────────────────────────────────
+
+def evaluate_model(
+    model,
+    X_tab_test: np.ndarray,
+    X_img_test: np.ndarray,
+    y_test: np.ndarray,
+    label_encoder=None,
+    threshold: float = 0.5
+) -> tuple[float, float]:
+    """
+    Full evaluation: accuracy, AUC, pAUC, confusion matrix, classification report.
+
+    Returns:
+        (accuracy, auc_score)
+    """
+    preds = model.predict(
+        {"image_input": X_img_test, "tabular_input": X_tab_test}, verbose=0
+    )
+
+    if preds.shape[-1] == 1:
+        y_prob = preds.flatten()
+        y_pred = (y_prob > threshold).astype(int)
     else:
-        idx = np.searchsorted(tpr, min_tpr)
-        if idx >= len(tpr):
-            return 0.0
-        # Nội suy tuyến tính
-        if idx > 0 and tpr[idx - 1] < min_tpr:
-            slope = (fpr[idx] - fpr[idx - 1]) / max(tpr[idx] - tpr[idx - 1], 1e-9)
-            fpr_at_min_tpr = fpr[idx - 1] + slope * (min_tpr - tpr[idx - 1])
+        y_prob = preds[:, 1]
+        y_pred = np.argmax(preds, axis=1)
+
+    acc = accuracy_score(y_test, y_pred)
+    auc_score = roc_auc_score(y_test, y_prob)
+
+    # Partial AUC at TPR ≥ 80 % (ISIC 2024 competition metric)
+    fpr, tpr, _ = roc_curve(y_test, y_prob)
+    mask = tpr >= 0.8
+    pauc = auc(fpr[mask], tpr[mask]) / (1.0 - 0.8) if mask.sum() > 1 else float("nan")
+
+    print(f"Accuracy : {acc:.4f}")
+    print(f"AUC-ROC  : {auc_score:.4f}")
+    print(f"pAUC@80% : {pauc:.4f}  ← ISIC 2024 competition metric")
+    print(classification_report(y_test, y_pred,
+                                target_names=["Benign (0)", "Malignant (1)"]))
+
+    # Confusion matrix plot
+    cm = confusion_matrix(y_test, y_pred)
+    _plot_confusion_matrix(cm)
+
+    return acc, auc_score
+
+
+def _plot_confusion_matrix(cm: np.ndarray) -> None:
+    import seaborn as sns
+    plt.figure(figsize=(5, 4))
+    sns.heatmap(cm, annot=True, fmt="d", cmap="Blues",
+                xticklabels=["Benign", "Malignant"],
+                yticklabels=["Benign", "Malignant"])
+    plt.xlabel("Predicted")
+    plt.ylabel("Actual")
+    plt.title("Confusion Matrix")
+    plt.tight_layout()
+    plt.show()
+
+
+def plot_training_history(history) -> None:
+    """Plot accuracy, loss and AUC curves."""
+    hist = history.history
+    epochs = range(1, len(hist.get("loss", [])) + 1)
+    n_plots = 2 + int("auc" in hist)
+    plt.figure(figsize=(6 * n_plots, 5))
+
+    for i, (key, label) in enumerate([("accuracy", "Accuracy"), ("loss", "Loss")]):
+        plt.subplot(1, n_plots, i + 1)
+        if key in hist:
+            plt.plot(epochs, hist[key], "bo-", label=f"Train {label}")
+        if f"val_{key}" in hist:
+            plt.plot(epochs, hist[f"val_{key}"], "ro-", label=f"Val {label}")
+        plt.title(label)
+        plt.xlabel("Epochs")
+        plt.legend()
+
+    if "auc" in hist:
+        plt.subplot(1, n_plots, 3)
+        plt.plot(epochs, hist["auc"], "go-", label="Train AUC")
+        if "val_auc" in hist:
+            plt.plot(epochs, hist["val_auc"], "mo-", label="Val AUC")
+        plt.title("AUC (ISIC 2024 metric)")
+        plt.xlabel("Epochs")
+        plt.legend()
+
+    plt.tight_layout()
+    plt.show()
+
+
+# ── XAI ───────────────────────────────────────────────────────────────────────
+
+class GradCAMExplainer:
+    """Grad-CAM heatmap over the last convolutional layer."""
+
+    def __init__(self, model, last_conv_layer_name: str):
+        self.model = model
+        self.grad_model = tf.keras.models.Model(
+            inputs=model.inputs,
+            outputs=[model.get_layer(last_conv_layer_name).output, model.output],
+        )
+
+    def compute_heatmap(
+        self,
+        image: np.ndarray,
+        tabular: np.ndarray,
+        class_idx: int | None = None
+    ) -> np.ndarray:
+        """
+        Args:
+            image:   (1, H, W, 3) float32
+            tabular: (1, F) float32
+        Returns:
+            2-D heatmap array, values in [0, 1].
+        """
+        with tf.GradientTape() as tape:
+            conv_out, preds = self.grad_model([image, tabular])
+            if class_idx is None:
+                class_idx = int(tf.argmax(preds[0]))
+            loss = preds[:, class_idx]
+
+        grads = tape.gradient(loss, conv_out)
+        pooled = tf.reduce_mean(grads, axis=(0, 1, 2))
+        heatmap = tf.reduce_sum(conv_out[0] * pooled, axis=-1)
+        heatmap = tf.maximum(heatmap, 0)
+        heatmap = heatmap / (tf.reduce_max(heatmap) + 1e-8)
+        return heatmap.numpy()
+
+    def overlay_heatmap(
+        self,
+        heatmap: np.ndarray,
+        image: np.ndarray,
+        alpha: float = 0.4
+    ) -> np.ndarray:
+        h, w = image.shape[:2]
+        heatmap_u8 = cv2.applyColorMap(
+            (cv2.resize(heatmap, (w, h)) * 255).astype(np.uint8),
+            cv2.COLORMAP_JET,
+        )
+        base = (image * 255).astype(np.uint8) if image.max() <= 1 else image.astype(np.uint8)
+        return cv2.addWeighted(base, 1 - alpha, heatmap_u8, alpha, 0)
+
+
+class SHAPMetadataExplainer:
+    """SHAP DeepExplainer wrapper for the tabular branch."""
+
+    def __init__(self, model, background_tabular: np.ndarray,
+                 background_image: np.ndarray, feature_names: list[str]):
+        import shap
+
+        if background_image.ndim == 3:
+            background_image = background_image[np.newaxis]
+
+        bg_img_tensor = tf.convert_to_tensor(background_image, dtype=tf.float32)
+        H, W, C = bg_img_tensor.shape[-3:]
+
+        tab_input = tf.keras.Input(shape=background_tabular.shape[1:])
+
+        def tile_image(x):
+            batch = tf.shape(x)[0]
+            return tf.tile(bg_img_tensor, [batch, 1, 1, 1])
+
+        img_tiled = tf.keras.layers.Lambda(
+            tile_image, output_shape=(H, W, C)
+        )(tab_input)
+
+        output = model({"image_input": img_tiled, "tabular_input": tab_input})
+        self.wrapper_model = tf.keras.Model(inputs=tab_input, outputs=output)
+        self.explainer = shap.DeepExplainer(self.wrapper_model, background_tabular)
+        self.feature_names = feature_names
+
+    def explain(self, X: np.ndarray):
+        return self.explainer.shap_values(X)
+
+
+class MultimodalXAIRunner:
+    """Runs GradCAM + SHAP together and visualises the results."""
+
+    def __init__(self, model, background_tabular, background_image,
+                 feature_names, last_conv_layer: str):
+        print("Initialising Multimodal XAI Runner...")
+        self.model = model
+        self.feature_names = feature_names
+        self.shap_explainer = SHAPMetadataExplainer(
+            model, background_tabular, background_image, feature_names
+        )
+        self.gradcam = GradCAMExplainer(model, last_conv_layer)
+        print("XAI ready.")
+
+    def explain(
+        self,
+        tabular_sample: np.ndarray,
+        image_sample: np.ndarray,
+        visualize: bool = True
+    ) -> dict:
+        tab_exp = tabular_sample[np.newaxis]
+        img_exp = image_sample[np.newaxis]
+
+        shap_values = self.shap_explainer.explain(tab_exp)
+        heatmap = self.gradcam.compute_heatmap(img_exp, tab_exp)
+
+        if visualize:
+            self._visualize(image_sample, heatmap, shap_values, tabular_sample)
+
+        return {"shap_values": shap_values, "heatmap": heatmap}
+
+    def _visualize(self, image, heatmap, shap_values, tabular_sample):
+        import shap as shap_lib
+
+        overlay = self.gradcam.overlay_heatmap(heatmap, image)
+        fig, axes = plt.subplots(1, 2, figsize=(14, 5))
+
+        axes[0].imshow(overlay)
+        axes[0].set_title("Grad-CAM Heatmap")
+        axes[0].axis("off")
+
+        # Extract 1-D SHAP values for the sample
+        if isinstance(shap_values, list):
+            sv = shap_values[0][0].flatten()
         else:
-            fpr_at_min_tpr = fpr[idx]
+            sv = shap_values[0].flatten()
 
-    # Lọc các điểm có TPR ≥ min_tpr
-    mask = tpr >= min_tpr
-    tpr_clip = np.concatenate([[min_tpr], tpr[mask]])
-    fpr_clip = np.concatenate([[fpr_at_min_tpr], fpr[mask]])
+        top_idx = np.argsort(np.abs(sv))[-10:][::-1]
+        axes[1].barh([self.feature_names[i] for i in top_idx], sv[top_idx])
+        axes[1].set_title("Top SHAP Feature Impacts")
+        axes[1].set_xlabel("SHAP value")
+        axes[1].invert_yaxis()
 
-    if len(fpr_clip) < 2:
-        return 0.0
-
-    # Tính AUC bằng hình thang, chuẩn hóa về [0, 1]
-    width = fpr_clip[-1] - fpr_clip[0]
-    if width <= 0:
-        return 0.0
-
-    pauc = np.trapz(tpr_clip, fpr_clip) / width
-    return float(np.clip(pauc, 0.0, 1.0))
-
-
-# ─────────────────────────────────────────────────────────────────────────────
-# Train một epoch
-# ─────────────────────────────────────────────────────────────────────────────
-def train_epoch(
-    model: nn.Module,
-    loader,
-    optimizer: torch.optim.Optimizer,
-    criterion: nn.Module,
-    device: torch.device,
-    scaler=None,
-    grad_clip_norm: float = 1.0,
-):
-    """
-    Huấn luyện một epoch cho binary task.
-    Trả về (avg_loss, balanced_accuracy).
-    """
-    model.train()
-    total_loss = 0.0
-    all_preds, all_labels = [], []
-
-    for imgs, meta, labels in loader:
-        imgs   = imgs.to(device)
-        meta   = meta.to(device)
-        labels = labels.to(device).float()
-
-        optimizer.zero_grad()
-
-        if scaler:  # AMP
-            with torch.cuda.amp.autocast():
-                logits = model(imgs, meta)          # (B,) logit đơn
-                loss   = criterion(logits, labels)
-            scaler.scale(loss).backward()
-            scaler.unscale_(optimizer)
-            nn.utils.clip_grad_norm_(model.parameters(), max_norm=grad_clip_norm)
-            scaler.step(optimizer)
-            scaler.update()
-        else:
-            logits = model(imgs, meta)
-            loss   = criterion(logits, labels)
-            loss.backward()
-            nn.utils.clip_grad_norm_(model.parameters(), max_norm=grad_clip_norm)
-            optimizer.step()
-
-        total_loss += loss.item()
-
-        # Binary prediction: sigmoid > 0.5
-        preds = (torch.sigmoid(logits) > 0.5).long().cpu().numpy()
-        all_preds.extend(preds)
-        all_labels.extend(labels.long().cpu().numpy())
-
-    avg_loss = total_loss / len(loader)
-    bal_acc  = balanced_accuracy_score(all_labels, all_preds)
-    return avg_loss, bal_acc
-
-
-# ─────────────────────────────────────────────────────────────────────────────
-# Validation epoch
-# ─────────────────────────────────────────────────────────────────────────────
-@torch.no_grad()
-def val_epoch(
-    model: nn.Module,
-    loader,
-    criterion: nn.Module,
-    device: torch.device,
-    pauc_min_tpr: float = 0.80,
-):
-    """
-    Đánh giá một epoch cho binary task.
-
-    Trả về tuple:
-        (avg_loss, bal_acc, f1, auc_roc, pauc, all_probs, all_labels)
-    """
-    model.eval()
-    total_loss = 0.0
-    all_probs, all_preds, all_labels = [], [], []
-
-    for imgs, meta, labels in loader:
-        imgs   = imgs.to(device)
-        meta   = meta.to(device)
-        labels = labels.to(device).float()
-
-        logits = model(imgs, meta)              # (B,) logit đơn
-        loss   = criterion(logits, labels)
-        total_loss += loss.item()
-
-        probs = torch.sigmoid(logits).cpu().numpy()   # xác suất malignant
-        preds = (probs > 0.5).astype(int)
-
-        all_probs.extend(probs.tolist())
-        all_preds.extend(preds.tolist())
-        all_labels.extend(labels.long().cpu().numpy().tolist())
-
-    avg_loss   = total_loss / len(loader)
-    all_probs  = np.array(all_probs)
-    all_preds  = np.array(all_preds)
-    all_labels = np.array(all_labels)
-
-    # Balanced Accuracy
-    bal_acc = balanced_accuracy_score(all_labels, all_preds)
-
-    # F1 binary
-    f1 = f1_score(all_labels, all_preds, zero_division=0)
-
-    # AUC-ROC toàn phần
-    try:
-        auc = roc_auc_score(all_labels, all_probs)
-    except ValueError:
-        auc = 0.0
-
-    # pAUC (metric chính ISIC 2024)
-    pauc = compute_pauc(all_labels, all_probs, min_tpr=pauc_min_tpr)
-
-    return avg_loss, bal_acc, f1, auc, pauc, all_probs, all_labels
-
-
-# ─────────────────────────────────────────────────────────────────────────────
-# Vòng lặp huấn luyện chính
-# ─────────────────────────────────────────────────────────────────────────────
-def train(cfg: dict):
-    device = torch.device(cfg["device"] if torch.cuda.is_available() else "cpu")
-    print(f"Device: {device}")
-
-    # ── MLflow ────────────────────────────────────────────────────────────────
-    mlflow.set_tracking_uri(cfg["mlflow_tracking_uri"])
-    mlflow.set_experiment(cfg["experiment_name"])
-
-    with mlflow.start_run(run_name=cfg["run_name"]):
-        mlflow.log_params({
-            k: v for k, v in cfg.items()
-            if k not in ("csv_path", "hdf5_path", "save_dir", "preprocessor_path")
-        })
-
-        # ── DataLoader ────────────────────────────────────────────────────────
-        train_loader, val_loader, preprocessor = build_dataloaders(
-            csv_path=cfg["csv_path"],
-            hdf5_path=cfg["hdf5_path"],
-            fold=cfg.get("fold", 0),
-            batch_size=cfg.get("batch_size", 32),
-            num_workers=cfg.get("num_workers", 4),
-            image_size=cfg.get("image_size", 224),
-            use_weighted_sampler=cfg.get("use_weighted_sampler", True),
-            apply_hair_removal=cfg.get("apply_hair_removal", False),
-            apply_color_constancy=cfg.get("apply_color_constancy", True),
-            preprocessor_path=cfg.get("preprocessor_path"),
-            n_folds=cfg.get("n_folds", 5),
-            seed=cfg.get("seed", 42),
-            pin_memory=(device.type == "cuda"),
-        )
-
-        # ── pos_weight cho BinaryFocalLoss ────────────────────────────────────
-        df_raw = pd.read_csv(cfg["csv_path"])
-        df     = clean_metadata(df_raw)
-        pos_weight = compute_pos_weight(df).to(device)
-        print(f"pos_weight = {pos_weight.item():.2f}")
-
-        # ── Model + Loss + Optimizer ──────────────────────────────────────────
-        model = MultimodalSkinClassifier(
-            num_classes=cfg.get("num_classes", 1),
-            metadata_input_dim=cfg.get("metadata_input_dim", 9),
-            pretrained=cfg.get("pretrained", True),
-            freeze_bn=cfg.get("freeze_bn", False),
-        ).to(device)
-
-        criterion = BinaryFocalLoss(
-            gamma=cfg.get("gamma_focal", 2.0),
-            pos_weight=pos_weight,
-            alpha=cfg.get("focal_alpha", 0.25),
-        )
-        optimizer = AdamW(
-            model.parameters(),
-            lr=cfg.get("lr", 1e-4),
-            weight_decay=cfg.get("weight_decay", 1e-4),
-        )
-        scheduler = CosineAnnealingLR(
-            optimizer,
-            T_max=cfg.get("scheduler_t_max", cfg.get("num_epochs", 30)),
-        )
-
-        scaler = (
-            torch.cuda.amp.GradScaler()
-            if device.type == "cuda" and cfg.get("use_amp", True)
-            else None
-        )
-
-        # ── Vòng lặp epoch ────────────────────────────────────────────────────
-        best_metric_value = 0.0
-        best_metric_key   = cfg.get("best_metric", "val/pauc")
-        pauc_min_tpr      = cfg.get("pauc_min_tpr", 0.80)
-        grad_clip_norm    = cfg.get("grad_clip_norm", 1.0)
-
-        save_dir = Path(cfg["save_dir"])
-        save_dir.mkdir(parents=True, exist_ok=True)
-
-        for epoch in range(1, cfg["num_epochs"] + 1):
-            t0 = time.time()
-
-            train_loss, train_bal_acc = train_epoch(
-                model, train_loader, optimizer, criterion,
-                device, scaler, grad_clip_norm,
-            )
-            val_loss, val_bal_acc, val_f1, val_auc, val_pauc, _, _ = val_epoch(
-                model, val_loader, criterion, device, pauc_min_tpr,
-            )
-            scheduler.step()
-            elapsed = time.time() - t0
-
-            # ── Ghi log MLflow ────────────────────────────────────────────────
-            metrics = {
-                "train/loss":              train_loss,
-                "train/balanced_accuracy": train_bal_acc,
-                "val/loss":                val_loss,
-                "val/balanced_accuracy":   val_bal_acc,
-                "val/f1_binary":           val_f1,
-                "val/auc_roc":             val_auc,
-                "val/pauc":                val_pauc,
-                "lr":                      scheduler.get_last_lr()[0],
-            }
-            mlflow.log_metrics(metrics, step=epoch)
-
-            print(
-                f"Epoch {epoch:03d}/{cfg['num_epochs']} "
-                f"| loss {train_loss:.4f}/{val_loss:.4f} "
-                f"| bal_acc {train_bal_acc:.4f}/{val_bal_acc:.4f} "
-                f"| AUC {val_auc:.4f} | pAUC {val_pauc:.4f} "
-                f"| F1 {val_f1:.4f} | {elapsed:.1f}s"
-            )
-
-            # ── Lưu checkpoint tốt nhất ───────────────────────────────────────
-            current_value = metrics.get(best_metric_key, val_pauc)
-            if current_value > best_metric_value:
-                best_metric_value = current_value
-                ckpt_path = save_dir / f"best_model_fold{cfg['fold']}.pt"
-                torch.save(model.state_dict(), str(ckpt_path))
-                mlflow.log_artifact(str(ckpt_path), artifact_path="checkpoints")
-                print(f"  ✓ Best {best_metric_key} = {best_metric_value:.4f} — đã lưu checkpoint")
-
-        # ── Đăng ký model lên MLflow Registry ────────────────────────────────
-        mlflow.pytorch.log_model(
-            model,
-            artifact_path="model",
-            registered_model_name="multimodal_skin_cancer_isic2024",
-        )
-
-        # ── Lưu preprocessor artifact ─────────────────────────────────────────
-        pp_path = save_dir / "metadata_preprocessor.pkl"
-        preprocessor.save(str(pp_path))
-        mlflow.log_artifact(str(pp_path), artifact_path="artifacts")
-
-        mlflow.log_metric(f"best_{best_metric_key.replace('/', '_')}", best_metric_value)
-        print(f"\nHuấn luyện hoàn tất. Best {best_metric_key}: {best_metric_value:.4f}")
-
-
-# ─────────────────────────────────────────────────────────────────────────────
-# Entry Point
-# ─────────────────────────────────────────────────────────────────────────────
-if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="Train ISIC 2024 Multimodal Model")
-    parser.add_argument("--config", type=str, default=None)
-    args = parser.parse_args()
-
-    cfg = DEFAULT_CONFIG.copy()
-    if args.config:
-        with open(args.config) as f:
-            cfg.update(yaml.safe_load(f))
-
-    train(cfg)
+        plt.tight_layout()
+        plt.show()

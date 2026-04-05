@@ -1,43 +1,28 @@
-# ── Dockerfile.preprocessing ─────────────────────────────────────────────────
-# Lightweight image for data preprocessing & feature engineering.
-# Uses pandas, numpy, scikit-learn — no heavy GPU framework needed here.
-# ─────────────────────────────────────────────────────────────────────────────
-
-ARG PYTHON_VERSION=3.11
-ARG BUILD_SHA=unknown
-
-# ── Stage 1: builder ──────────────────────────────────────────────────────────
-FROM python:${PYTHON_VERSION}-slim AS builder
-
-WORKDIR /build
-
-RUN apt-get update && apt-get install -y --no-install-recommends \
-    gcc g++ \
-    && rm -rf /var/lib/apt/lists/*
-
-COPY requirements-preprocessing.txt .
-RUN pip install --upgrade pip \
-    && pip install --prefix=/install --no-cache-dir -r requirements-preprocessing.txt
-
-# ── Stage 2: runtime ──────────────────────────────────────────────────────────
-FROM python:${PYTHON_VERSION}-slim AS runtime
-
-ARG BUILD_SHA
-ENV BUILD_SHA=${BUILD_SHA} \
-    PYTHONDONTWRITEBYTECODE=1 \
-    PYTHONUNBUFFERED=1 \
-    PYTHONPATH=/app
+FROM python:3.11-slim
 
 WORKDIR /app
 
-COPY --from=builder /install /usr/local
-COPY src/preprocessing/ ./src/preprocessing/
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    libglib2.0-0 libsm6 libxext6 libxrender-dev libgomp1 \
+    libhdf5-dev gcc g++ \
+    && rm -rf /var/lib/apt/lists/*
 
-RUN useradd --no-create-home --shell /bin/false mluser \
-    && chown -R mluser:mluser /app
-USER mluser
+COPY Multimodal/requirement.txt ./requirements.txt
+RUN pip install --no-cache-dir -r requirements.txt
 
-LABEL org.opencontainers.image.revision=${BUILD_SHA} \
-      org.opencontainers.image.title="mlops-preprocessing"
+COPY . .
 
-ENTRYPOINT ["python", "-m", "src.preprocessing.run"]
+ENV PYTHONPATH=/app
+
+# Entrypoint: extract images from HDF5, then preprocess metadata CSV
+CMD ["python", "-c", "\
+import yaml, pandas as pd, os; \
+from Multimodic.preprocessing.image_preprocessing import extract_images_from_hdf5; \
+from Multimodal.preprocessing.tabular_preprocessing import preprocess_csv_data, save_preprocessor; \
+cfg = yaml.safe_load(open('Multimodal/config/train_config.yaml')); \
+extract_images_from_hdf5(cfg['data']['hdf5_path'], cfg['data']['image_dir'], cfg['data'].get('max_images')); \
+df = pd.read_csv(cfg['data']['csv_path']); \
+df_out, report = preprocess_csv_data(df); \
+df_out.to_csv('Multimodal/data/raw/train-metadata-processed.csv', index=False); \
+print('Preprocessing complete:', report['final_shape']) \
+"]

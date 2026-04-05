@@ -1,129 +1,112 @@
 """
 scripts/run_train.py
-Main entry point for training runs — called by CI/CD and manually.
+CLI entry point: runs the full ISIC 2024 multimodal training pipeline.
 
 Usage:
-    # Default config
-    python scripts/run_train.py
-
-    # Custom config
-    python scripts/run_train.py --config Multimodal/config/train_config.yaml
-
-    # Override specific params
-    python scripts/run_train.py --fold 1 --epochs 50 --batch-size 64
-
-    # Full pipeline (preprocessing + training)
-    python scripts/run_train.py --full-pipeline --csv data/meta.csv --image-dir data/images/
+    python scripts/run_train.py [--config Multimodal/config/train_config.yaml]
 """
 
 import argparse
-import logging
 import sys
-import yaml
-from pathlib import Path
+import os
 
-sys.path.insert(0, str(Path(__file__).parent.parent))
-
-from Multimodal.training.train import train, DEFAULT_CONFIG
-
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s | %(levelname)s | %(message)s",
-    datefmt="%Y-%m-%d %H:%M:%S",
-)
-log = logging.getLogger(__name__)
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 
 def parse_args():
-    parser = argparse.ArgumentParser(description="Train Multimodal Skin Cancer Model")
-
-    # Config file (base)
-    parser.add_argument("--config", type=str, default=None,
-                        help="Path to YAML config (overrides defaults)")
-
-    # Data args
-    parser.add_argument("--csv",       type=str, default=None)
-    parser.add_argument("--image-dir", type=str, default=None)
-    parser.add_argument("--fold",      type=int, default=None,
-                        help="Validation fold index 0-4")
-
-    # Training args
-    parser.add_argument("--epochs",     type=int,   default=None)
-    parser.add_argument("--batch-size", type=int,   default=None)
-    parser.add_argument("--lr",         type=float, default=None)
-    parser.add_argument("--device",     type=str,   default=None,
-                        choices=["cuda", "cpu"])
-
-    # MLflow
-    parser.add_argument("--mlflow-uri",  type=str, default=None)
-    parser.add_argument("--run-name",    type=str, default=None)
-    parser.add_argument("--experiment",  type=str, default=None)
-
-    # Pipeline mode
-    parser.add_argument("--full-pipeline", action="store_true",
-                        help="Run preprocessing + training end-to-end")
-
+    parser = argparse.ArgumentParser(
+        description="Train ISIC 2024 multimodal skin-lesion classifier"
+    )
+    parser.add_argument(
+        "--config",
+        default="Multimodal/config/train_config.yaml",
+        help="Path to YAML training config (default: Multimodal/config/train_config.yaml)",
+    )
+    parser.add_argument(
+        "--no-mlflow",
+        action="store_true",
+        help="Run training without MLflow logging",
+    )
     return parser.parse_args()
 
 
-def build_config(args) -> dict:
-    """Merge DEFAULT_CONFIG ← YAML ← CLI args (CLI has highest priority)."""
-    cfg = DEFAULT_CONFIG.copy()
-
-    # Load YAML
-    if args.config:
-        path = Path(args.config)
-        if not path.exists():
-            log.error("Config file not found: %s", args.config)
-            sys.exit(1)
-        with open(path) as f:
-            yaml_cfg = yaml.safe_load(f)
-        cfg.update(yaml_cfg)
-        log.info("Loaded config from %s", args.config)
-
-    # CLI overrides
-    overrides = {
-        "csv_path":            args.csv,
-        "image_dir":           args.image_dir,
-        "fold":                args.fold,
-        "num_epochs":          args.epochs,
-        "batch_size":          args.batch_size,
-        "lr":                  args.lr,
-        "device":              args.device,
-        "mlflow_tracking_uri": args.mlflow_uri,
-        "run_name":            args.run_name,
-        "experiment_name":     args.experiment,
-    }
-    for k, v in overrides.items():
-        if v is not None:
-            cfg[k] = v
-            log.info("CLI override: %s = %s", k, v)
-
-    return cfg
-
-
 def main():
-    args   = parse_args()
-    cfg    = build_config(args)
+    args = parse_args()
 
-    log.info("=" * 60)
-    log.info("Multimodal Skin Cancer Training")
-    log.info("  Experiment : %s", cfg["experiment_name"])
-    log.info("  Run name   : %s", cfg["run_name"])
-    log.info("  Fold       : %d / 5-fold CV", cfg["fold"])
-    log.info("  Epochs     : %d", cfg["num_epochs"])
-    log.info("  Batch size : %d", cfg["batch_size"])
-    log.info("  Device     : %s", cfg["device"])
-    log.info("  MLflow URI : %s", cfg["mlflow_tracking_uri"])
-    log.info("=" * 60)
+    if args.no_mlflow:
+        # Direct training without MLflow
+        import yaml
+        import numpy as np
+        import pandas as pd
 
-    if args.full_pipeline:
-        from src.train import full_pipeline
-        full_pipeline(cfg)
+        from Multimodal.preprocessing.image_preprocessing import extract_images_from_hdf5
+        from Multimodal.preprocessing.tabular_preprocessing import (
+            preprocess_csv_data, save_preprocessor, ID_COL
+        )
+        from Multimodal.data_loader.dataloader import build_dataloaders
+        from Multimodal.models.multimodal_model import build_multimodal_model
+        from Multimodal.training.train import (
+            train_model, evaluate_model, plot_training_history
+        )
+
+        with open(args.config) as f:
+            cfg = yaml.safe_load(f)
+
+        # Extract images if needed
+        image_dir = cfg["data"]["image_dir"]
+        if not os.path.exists(image_dir) or not os.listdir(image_dir):
+            extract_images_from_hdf5(
+                cfg["data"]["hdf5_path"],
+                image_dir,
+                max_images=cfg["data"].get("max_images"),
+            )
+
+        df_raw = pd.read_csv(cfg["data"]["csv_path"])
+        available_ids = {
+            os.path.splitext(f)[0]
+            for f in os.listdir(image_dir) if f.lower().endswith(".jpg")
+        }
+        df_raw = df_raw[df_raw[ID_COL].isin(available_ids)].reset_index(drop=True)
+
+        df, _ = preprocess_csv_data(df_raw)
+
+        img_h, img_w = cfg["preprocessing"]["image_size"]
+        splits = build_dataloaders(
+            df, image_dir, target_size=(img_h, img_w),
+            test_size=cfg["split"]["test_size"],
+            val_size=cfg["split"]["val_size"],
+            random_state=cfg["split"]["random_state"],
+        )
+
+        train, val, test = splits["train"], splits["val"], splits["test"]
+        save_preprocessor(
+            {"encoders": splits["encoders"], "tabular_cols": splits["tabular_cols"]},
+            cfg["output"]["preprocessor_path"],
+        )
+
+        model = build_multimodal_model(
+            tabular_shape=(len(splits["tabular_cols"]),),
+            image_shape=tuple(cfg["model"]["image_shape"]),
+            num_classes=cfg["model"]["num_classes"],
+        )
+
+        history = train_model(
+            model,
+            train["X_tab"], train["X_img"], train["y"],
+            val["X_tab"],   val["X_img"],   val["y"],
+            epochs=cfg["training"]["epochs"],
+            batch_size=cfg["training"]["batch_size"],
+            checkpoint_path=cfg["output"]["checkpoint_path"],
+        )
+
+        plot_training_history(history)
+        acc, auc = evaluate_model(model, test["X_tab"], test["X_img"], test["y"])
+        print(f"\n✅ Done — Accuracy: {acc:.4f}, AUC: {auc:.4f}")
+
     else:
-        train(cfg)
-
-    log.info("Done.")
+        # Run via MLflow-integrated train.py
+        from MLflow_signature.train import main as mlflow_main
+        mlflow_main()
 
 
 if __name__ == "__main__":

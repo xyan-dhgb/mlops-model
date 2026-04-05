@@ -1,192 +1,159 @@
-# Skin Cancer Multimodal ML – CI/CD Pipeline
+# ISIC 2024 – Multimodal Skin Lesion Classifier
 
-> **Dataset**: [Skin Cancer – Kaggle](https://www.kaggle.com/datasets/mahdavi1202/skin-cancer)  
-> **Model**: Multimodal CNN (image branch) + Dense (EHR/tabular branch) fused with TensorFlow/Keras  
-> **Registry**: AWS ECR  
-> **CI/CD**: GitHub Actions
+Binary classification of skin lesions (Benign vs Malignant) using a
+**multimodal deep learning model** that fuses dermoscopy images (CNN branch)
+with patient metadata (MLP branch).
+
+Primary competition metric: **pAUC @ 80% TPR** (normalised partial AUC).
 
 ---
 
 ## Project Structure
 
 ```
-mlops-model/
-  .github/workflows/
-    mlops-pipeline.yml         ← Pipeline CI/CD 6 job
-  docker/mlflow/
-    docker-compose.yml          ← Stack cục bộ: Postgres + MinIO + MLflow
-    k8s-mlflow.yaml             ← Manifest Kubernetes (namespace mlops)
-    .env.example                ← Mẫu biến môi trường
-  Multimodal/
-    config/train_config.yaml    ← Siêu tham số huấn luyện
-    data/raw/                   ← Ảnh ISIC + CSV (gitignored)
-    data_loader/dataloader.py   ← build_dataloaders()
-    final/                      ← Checkpoint + artifact preprocessor
-    models/multimodal_model.py  ← EfficientNet-B3 + MLP + FocalLoss
-    preprocessing/
-      image_preprocessing.py   ← Loại bỏ lông, chuẩn hóa màu, augmentation
-      tabular_preprocessing.py ← MetadataPreprocessor, tạo fold
-    training/train.py           ← Vòng lặp huấn luyện + ghi log MLflow
-    utils/
-      xrai_explainer.py         ← XRAI + GradCAM
-      shap_explainer.py         ← SHAP + MultimodalXAIRunner
-    requirement.txt
-  src/
-    data_preprocessing.py       ← Xác thực hash + điều phối pipeline (CLI)
-    model.py                    ← Nạp mô hình + đánh giá adversarial + MLflow signature
-    train.py                    ← Điều phối pipeline đầy đủ
-  scripts/
-    run_train.py                ← Entry point chính (CLI)
-  tests/
-    conftest.py
-    test_data_preprocessing.py
-    test_model.py
-    test_train.py
-  README.md
-
+.github/workflows/ml-ci-cd.yml   ← GitHub Actions CI/CD
+docker/
+  Dockerfile                     ← Base image
+  Dockerfile.preprocessing       ← HDF5 extraction + CSV cleaning
+  Dockerfile.training            ← Model training
+  Dockerfile.serving             ← FastAPI inference server
+  mflow/
+    docker-compose.yml           ← MLflow + training + serving stack
+    k8s-mflow.yaml               ← Kubernetes manifests
+MLflow_signature/
+  train.py                       ← MLflow-integrated training entry point
+Multimodal/
+  config/train_config.yaml       ← All hyperparameters & paths
+  data/raw/                      ← ISIC images (HDF5) + CSV metadata
+  data_loader/dataloader.py      ← build_dataloaders()
+  final/                         ← Saved model + preprocessor
+  models/multimodal_model.py     ← build_multimodal_model()
+  preprocessing/
+    image_preprocessing.py       ← CLAHE, augmentation, HDF5 extraction
+    tabular_preprocessing.py     ← Impute, scale, encode
+  training/train.py              ← train_model(), evaluate_model(), XAI
+  utils/
+    metrics.py                   ← pAUC, ROC, metrics table
+    predict.py                   ← Single-sample inference helper
+    serving.py                   ← FastAPI app
+  requirement.txt
+scripts/run_train.py             ← CLI entry point
+src/
+  data_preprocessing.py          ← Public API (re-exports)
+  model.py                       ← Public API (re-exports)
+tests/
+  conftest.py
+  test_data_preprocessing.py
+  test_model.py
+  test_train.py
 ```
 
 ---
 
-## Pipeline Overview
+## Quick Start
 
-```
-Push / PR
-    │
-    ▼
-┌─────────────────────────────────────────────────────┐
-│  JOB 1 – Lint & Static Analysis                     │
-│  black, isort, flake8                               │
-└──────────────────────┬──────────────────────────────┘
-                       │ passes
-                       ▼
-┌─────────────────────────────────────────────────────┐
-│  JOB 2 – Unit Tests (Python 3.10 + 3.11)            │
-│  pytest  +  coverage ≥ 75 %                         │
-│  Tests for: data_preprocessing / model / train      │
-└──────────────────────┬──────────────────────────────┘
-                       │ passes  (push only, not PR)
-                       ▼
-┌─────────────────────────────────────────────────────┐
-│  JOB 3 – Build & Push to AWS ECR                    │
-│  • Multi-stage Docker build (builder + runtime)     │
-│  • Tags: sha-<commit>, <branch>, latest (main only) │
-│  • Layer cache via GitHub Actions cache             │
-│  • Trivy vulnerability scan                         │
-└──────────────────────┬──────────────────────────────┘
-                       │
-                       ▼
-┌─────────────────────────────────────────────────────┐
-│  JOB 4 – Notify                                     │
-│  Slack webhook + GitHub Step Summary                │
-└─────────────────────────────────────────────────────┘
-```
-
----
-
-## Required Secrets & Variables
-
-Configure these in **Settings → Secrets and variables → Actions**:
-
-### Secrets (`Settings → Secrets`)
-
-| Secret         | Description                                                                                               |
-| -------------- | --------------------------------------------------------------------------------------------------------- |
-| `AWS_ROLE_ARN` | ARN of the IAM role GitHub Actions assumes via OIDC (e.g. `arn:aws:iam::123456789:role/GitHubActionsECR`) |
-
-### Variables (`Settings → Variables`)
-
-| Variable            | Example value                                    |
-| ------------------- | ------------------------------------------------ |
-| `AWS_REGION`        | `ap-southeast-1`                                 |
-| `ECR_REGISTRY`      | `123456789.dkr.ecr.ap-southeast-1.amazonaws.com` |
-| `SLACK_WEBHOOK_URL` | `https://hooks.slack.com/...` (optional)         |
-
----
-
-## AWS IAM Setup (OIDC – no long-lived keys)
-
+### 1. Install dependencies
 ```bash
-# 1. Create OIDC provider for GitHub in AWS
-aws iam create-open-id-connect-provider \
-  --url https://token.actions.githubusercontent.com \
-  --client-id-list sts.amazonaws.com \
-  --thumbprint-list 6938fd4d98bab03faadb97b34396831e3780aea1
-
-# 2. Create ECR repository
-aws ecr create-repository \
-  --repository-name skin-cancer-multimodal \
-  --region ap-southeast-1
-
-# 3. Attach a trust policy to the IAM role allowing
-#    github.com/<org>/<repo> on branch main/develop
+pip install -r Multimodal/requirement.txt
 ```
 
-**Trust policy for the IAM role** (`trust-policy.json`):
-
-```json
-{
-  "Version": "2012-10-17",
-  "Statement": [
-    {
-      "Effect": "Allow",
-      "Principal": {
-        "Federated": "arn:aws:iam::<ACCOUNT_ID>:oidc-provider/token.actions.githubusercontent.com"
-      },
-      "Action": "sts:AssumeRoleWithWebIdentity",
-      "Condition": {
-        "StringLike": {
-          "token.actions.githubusercontent.com:sub": "repo:<ORG>/<REPO>:ref:refs/heads/*"
-        }
-      }
-    }
-  ]
-}
+### 2. Prepare data
+Place ISIC 2024 files under `Multimodal/data/raw/`:
+```
+Multimodal/data/raw/
+  train-metadata.csv
+  train-image.hdf5
 ```
 
-**Permissions policy** – attach `AmazonEC2ContainerRegistryPowerUser` to the role.
-
----
-
-## Running Tests Locally
-
+### 3. Train locally
 ```bash
-# Install deps
-pip install -r requirements.txt pytest pytest-cov
+# Without MLflow
+python scripts/run_train.py --no-mlflow
 
-# Run all unit tests
-pytest tests/ -v --cov=src --cov-report=term-missing
-
-# Run a specific test file
-pytest tests/test_model.py -v
+# With MLflow (requires MLflow server at localhost:5000)
+python scripts/run_train.py
 ```
 
----
-
-## Building the Docker Image Locally
-
+### 4. Run tests
 ```bash
-docker build -f docker/Dockerfile -t skin-cancer-ml:local .
+pytest tests/ -v --cov=Multimodal --cov=src
+```
 
-# Train (mount your dataset)
-docker run --rm \
-  -v /path/to/dataset:/data \
-  -v /path/to/output:/app/output \
-  -e EPOCHS=5 \
-  -e BATCH_SIZE=16 \
-  skin-cancer-ml:local
+### 5. Run with Docker Compose
+```bash
+cd docker/mflow
+docker-compose up --build
+```
+
+### 6. Inference API
+```bash
+# After training, start the serving container
+docker build -f docker/Dockerfile.serving -t isic2024-serving .
+docker run -p 8000:8000 \
+  -v $(pwd)/Multimodal/final:/app/Multimodal/final \
+  isic2024-serving
+
+# Health check
+curl http://localhost:8000/health
+
+# Predict
+curl -X POST http://localhost:8000/predict \
+  -F "image=@path/to/lesion.jpg" \
+  -F 'features={"age_approx": 55, "sex": "male", "anatom_site_general": "torso"}'
 ```
 
 ---
 
-## Dataset Columns (metadata.csv)
+## Model Architecture
 
-| Column         | Description                       |
-| -------------- | --------------------------------- |
-| `img_id`       | Image filename                    |
-| `diagnostic`   | Target label: BCC / MEL / SCC / … |
-| `age`          | Patient age                       |
-| `fitspatrick`  | Fitzpatrick skin type (1–6)       |
-| `diameter_1/2` | Lesion diameter (mm)              |
-| `region`       | Body region                       |
-| `gender`       | Patient gender                    |
+```
+Image (224×224×3)              Tabular metadata (N features)
+       │                                    │
+  CNN Branch                           MLP Branch
+  Conv2D(32) → BN → Pool               Dense(128) → Dropout(0.3)
+  Conv2D(64) → BN → Pool               Dense(64)  → Dropout(0.2)
+  Conv2D(128) → BN → Pool              Dense(32)
+  GlobalAvgPool → Dense(128)
+       │                                    │
+       └──────────── Concatenate ───────────┘
+                          │
+                    Dense(128) → Dropout(0.4)
+                    Dense(64)  → Dropout(0.3)
+                          │
+                  sigmoid (binary) / softmax (multi)
+                          │
+                       Output
+```
+
+---
+
+## XAI (Explainable AI)
+
+Two complementary explanations are generated per prediction:
+
+| Component | Scope | Method |
+|---|---|---|
+| **Grad-CAM** | Image branch | Gradient-weighted class activation map over the last Conv2D layer |
+| **SHAP** | Tabular branch | DeepExplainer waterfall + bar summary (global importance) |
+
+---
+
+## Key Metrics
+
+| Metric | Description |
+|---|---|
+| **pAUC@80%** | Primary – partial AUC at TPR ≥ 80% |
+| AUC-ROC | Overall discriminative ability |
+| Accuracy | Overall correctness |
+| Sensitivity | True positive rate (recall for malignant) |
+| Specificity | True negative rate |
+
+---
+
+## CI/CD Pipeline
+
+```
+Push → Lint (Black / Flake8) → Unit Tests → Build Docker images
+                                               └─ Deploy to k8s (main only)
+                                               └─ Manual training trigger
+```

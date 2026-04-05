@@ -1,252 +1,147 @@
 """
-Training Script — Multimodal Skin Cancer Detection
-MLflow experiment tracking: loss, AUC-ROC, balanced accuracy, F1 per class
-Run: python training/train.py --config config/train_config.yaml
+MLflow-integrated training entry point for ISIC 2024 multimodal model.
+Logs params, metrics, model signature, and artifacts.
 """
 
-import argparse
+import os
+import sys
 import yaml
-import time
-from pathlib import Path
-
 import numpy as np
-import torch
-import torch.nn as nn
-from torch.optim import AdamW
-from torch.optim.lr_scheduler import CosineAnnealingLR
-from sklearn.metrics import (
-    balanced_accuracy_score, roc_auc_score,
-    f1_score, classification_report,
-)
-import mlflow
-import mlflow.pytorch
-
-from models.multimodal_model import MultimodalSkinClassifier, FocalLoss
-from data_loader.dataloader import build_dataloaders
-from preprocessing.tabular_preprocessing import compute_class_weights, clean_metadata, create_folds
 import pandas as pd
+import mlflow
+import mlflow.keras
+
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
+from Multimodal.preprocessing.image_preprocessing import extract_images_from_hdf5
+from Multimodal.preprocessing.tabular_preprocessing import (
+    preprocess_csv_data, save_preprocessor, fit_encoders,
+    encode_categorical, get_tabular_columns, scale_features,
+    CATEGORICAL_COLS, ID_COL,
+)
+from Multimodal.data_loader.dataloader import build_dataloaders
+from Multimodal.models.multimodal_model import build_multimodal_model
+from Multimodal.training.train import train_model, evaluate_model, plot_training_history
 
 
-# ─────────────────────────────────────────────
-# Config
-# ─────────────────────────────────────────────
-DEFAULT_CONFIG = {
-    "experiment_name": "multimodal_skin_cancer",
-    "run_name": "efficientnet_b3_focal_fold0",
-    "csv_path": "data/raw/ISIC_2019_Training_Metadata.csv",
-    "image_dir": "data/raw/ISIC_2019_Training_Input",
-    "fold": 0,
-    "num_epochs": 30,
-    "batch_size": 32,
-    "lr": 1e-4,
-    "weight_decay": 1e-4,
-    "gamma_focal": 2.0,
-    "num_workers": 4,
-    "device": "cuda",
-    "save_dir": "final",
-    "mlflow_tracking_uri": "http://mlflow-service:5000",
-}
+def load_config(path: str = "Multimodal/config/train_config.yaml") -> dict:
+    with open(path) as f:
+        return yaml.safe_load(f)
 
 
-# ─────────────────────────────────────────────
-# Train one epoch
-# ─────────────────────────────────────────────
-def train_epoch(model, loader, optimizer, criterion, device, scaler=None):
-    model.train()
-    total_loss, all_preds, all_labels = 0.0, [], []
+def main():
+    cfg = load_config()
 
-    for imgs, meta, labels in loader:
-        imgs   = imgs.to(device)
-        meta   = meta.to(device)
-        labels = labels.to(device)
+    # ── MLflow setup ─────────────────────────────────────────────────────
+    mlflow.set_tracking_uri(cfg["output"]["mlflow_tracking_uri"])
+    mlflow.set_experiment(cfg["output"]["mlflow_experiment"])
 
-        optimizer.zero_grad()
+    with mlflow.start_run():
+        # ── Log config params ─────────────────────────────────────────────
+        mlflow.log_params({
+            "epochs":          cfg["training"]["epochs"],
+            "batch_size":      cfg["training"]["batch_size"],
+            "learning_rate":   cfg["training"]["learning_rate"],
+            "image_size":      str(cfg["preprocessing"]["image_size"]),
+            "test_size":       cfg["split"]["test_size"],
+            "max_images":      cfg["data"].get("max_images", "all"),
+            "apply_clahe":     cfg["preprocessing"]["apply_clahe"],
+            "use_class_weights": cfg["training"]["use_class_weights"],
+        })
 
-        if scaler:  # AMP
-            with torch.cuda.amp.autocast():
-                logits = model(imgs, meta)
-                loss   = criterion(logits, labels)
-            scaler.scale(loss).backward()
-            scaler.unscale_(optimizer)
-            nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
-            scaler.step(optimizer)
-            scaler.update()
-        else:
-            logits = model(imgs, meta)
-            loss   = criterion(logits, labels)
-            loss.backward()
-            nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
-            optimizer.step()
+        # ── Extract images from HDF5 if needed ───────────────────────────
+        image_dir = cfg["data"]["image_dir"]
+        if not os.path.exists(image_dir) or not os.listdir(image_dir):
+            extract_images_from_hdf5(
+                cfg["data"]["hdf5_path"],
+                image_dir,
+                max_images=cfg["data"].get("max_images"),
+            )
 
-        total_loss += loss.item()
-        preds = logits.argmax(dim=1).cpu().numpy()
-        all_preds.extend(preds)
-        all_labels.extend(labels.cpu().numpy())
+        # ── Load and preprocess CSV ───────────────────────────────────────
+        df_raw = pd.read_csv(cfg["data"]["csv_path"])
 
-    avg_loss = total_loss / len(loader)
-    bal_acc  = balanced_accuracy_score(all_labels, all_preds)
-    return avg_loss, bal_acc
+        # Keep only rows with extracted images
+        available_ids = {
+            os.path.splitext(f)[0]
+            for f in os.listdir(image_dir)
+            if f.lower().endswith(".jpg")
+        }
+        df_raw = df_raw[df_raw[ID_COL].isin(available_ids)].reset_index(drop=True)
+        print(f"Filtered DataFrame: {len(df_raw)} rows")
 
+        df, preprocess_report = preprocess_csv_data(df_raw)
 
-# ─────────────────────────────────────────────
-# Validation epoch
-# ─────────────────────────────────────────────
-@torch.no_grad()
-def val_epoch(model, loader, criterion, device, num_classes=7):
-    model.eval()
-    total_loss, all_preds, all_probs, all_labels = 0.0, [], [], []
-
-    for imgs, meta, labels in loader:
-        imgs   = imgs.to(device)
-        meta   = meta.to(device)
-        labels = labels.to(device)
-
-        logits = model(imgs, meta)
-        loss   = criterion(logits, labels)
-        total_loss += loss.item()
-
-        probs = torch.softmax(logits, dim=1).cpu().numpy()
-        preds = logits.argmax(dim=1).cpu().numpy()
-        all_probs.extend(probs)
-        all_preds.extend(preds)
-        all_labels.extend(labels.cpu().numpy())
-
-    avg_loss  = total_loss / len(loader)
-    all_preds  = np.array(all_preds)
-    all_probs  = np.array(all_probs)
-    all_labels = np.array(all_labels)
-
-    bal_acc = balanced_accuracy_score(all_labels, all_preds)
-    f1_macro = f1_score(all_labels, all_preds, average="macro", zero_division=0)
-
-    # AUC-ROC macro (one-vs-rest)
-    try:
-        auc = roc_auc_score(
-            all_labels, all_probs, multi_class="ovr",
-            average="macro", labels=list(range(num_classes))
-        )
-    except ValueError:
-        auc = 0.0
-
-    # Per-class F1
-    f1_per_class = f1_score(all_labels, all_preds, average=None,
-                            labels=list(range(num_classes)), zero_division=0)
-
-    return avg_loss, bal_acc, f1_macro, auc, f1_per_class
-
-
-# ─────────────────────────────────────────────
-# Main Training Loop
-# ─────────────────────────────────────────────
-def train(cfg: dict):
-    device = torch.device(cfg["device"] if torch.cuda.is_available() else "cpu")
-    print(f"Device: {device}")
-
-    # MLflow setup
-    mlflow.set_tracking_uri(cfg["mlflow_tracking_uri"])
-    mlflow.set_experiment(cfg["experiment_name"])
-
-    with mlflow.start_run(run_name=cfg["run_name"]):
-        mlflow.log_params({k: v for k, v in cfg.items()
-                           if k not in ("csv_path", "image_dir", "save_dir")})
-
-        # Data
-        train_loader, val_loader, preprocessor = build_dataloaders(
-            csv_path=cfg["csv_path"],
-            image_dir=cfg["image_dir"],
-            fold=cfg["fold"],
-            batch_size=cfg["batch_size"],
-            num_workers=cfg["num_workers"],
+        # ── Build dataloaders ─────────────────────────────────────────────
+        img_h, img_w = cfg["preprocessing"]["image_size"]
+        splits = build_dataloaders(
+            df, image_dir,
+            target_size=(img_h, img_w),
+            test_size=cfg["split"]["test_size"],
+            val_size=cfg["split"]["val_size"],
+            random_state=cfg["split"]["random_state"],
         )
 
-        # Class weights
-        df = pd.read_csv(cfg["csv_path"])
-        from preprocessing.tabular_preprocessing import clean_metadata
-        df = clean_metadata(df)
-        class_weights = compute_class_weights(df).to(device)
+        train, val, test = splits["train"], splits["val"], splits["test"]
 
-        # Model
-        model = MultimodalSkinClassifier(num_classes=7, pretrained=True).to(device)
-        criterion = FocalLoss(alpha=class_weights, gamma=cfg["gamma_focal"])
-        optimizer = AdamW(model.parameters(),
-                          lr=cfg["lr"], weight_decay=cfg["weight_decay"])
-        scheduler = CosineAnnealingLR(optimizer, T_max=cfg["num_epochs"])
+        # Save preprocessor
+        preprocessor = {
+            "encoders":     splits["encoders"],
+            "tabular_cols": splits["tabular_cols"],
+        }
+        save_preprocessor(preprocessor, cfg["output"]["preprocessor_path"])
 
-        scaler = torch.cuda.amp.GradScaler() if device.type == "cuda" else None
+        # ── Build model ───────────────────────────────────────────────────
+        tabular_shape = (len(splits["tabular_cols"]),)
+        image_shape   = tuple(cfg["model"]["image_shape"])
+        num_classes   = cfg["model"]["num_classes"]
 
-        CLASS_NAMES = ["MEL", "NV", "BCC", "AKIEC", "BKL", "DF", "VASC"]
-        best_auc = 0.0
-        save_dir = Path(cfg["save_dir"])
-        save_dir.mkdir(parents=True, exist_ok=True)
+        model = build_multimodal_model(tabular_shape, image_shape, num_classes)
+        model.summary()
 
-        for epoch in range(1, cfg["num_epochs"] + 1):
-            t0 = time.time()
-            train_loss, train_bal_acc = train_epoch(
-                model, train_loader, optimizer, criterion, device, scaler
-            )
-            val_loss, val_bal_acc, val_f1, val_auc, val_f1_per_class = val_epoch(
-                model, val_loader, criterion, device
-            )
-            scheduler.step()
-            elapsed = time.time() - t0
-
-            # MLflow logging
-            metrics = {
-                "train/loss": train_loss,
-                "train/balanced_accuracy": train_bal_acc,
-                "val/loss": val_loss,
-                "val/balanced_accuracy": val_bal_acc,
-                "val/f1_macro": val_f1,
-                "val/auc_roc_macro": val_auc,
-                "lr": scheduler.get_last_lr()[0],
-            }
-            for cls_idx, cls_name in enumerate(CLASS_NAMES):
-                metrics[f"val/f1_{cls_name}"] = float(val_f1_per_class[cls_idx])
-
-            mlflow.log_metrics(metrics, step=epoch)
-
-            print(
-                f"Epoch {epoch:03d}/{cfg['num_epochs']} "
-                f"| loss {train_loss:.4f}/{val_loss:.4f} "
-                f"| bal_acc {train_bal_acc:.4f}/{val_bal_acc:.4f} "
-                f"| AUC {val_auc:.4f} | F1 {val_f1:.4f} "
-                f"| {elapsed:.1f}s"
-            )
-
-            # Save best model
-            if val_auc > best_auc:
-                best_auc = val_auc
-                ckpt_path = save_dir / f"best_model_fold{cfg['fold']}.pt"
-                torch.save(model.state_dict(), ckpt_path)
-                mlflow.log_artifact(str(ckpt_path), artifact_path="checkpoints")
-                print(f"  ✓ Best AUC {best_auc:.4f} — checkpoint saved")
-
-        # Log final model to MLflow registry
-        mlflow.pytorch.log_model(
+        # ── Train ─────────────────────────────────────────────────────────
+        history = train_model(
             model,
-            artifact_path="model",
-            registered_model_name="multimodal_skin_cancer_v1",
+            train["X_tab"], train["X_img"], train["y"],
+            val["X_tab"],   val["X_img"],   val["y"],
+            epochs=cfg["training"]["epochs"],
+            batch_size=cfg["training"]["batch_size"],
+            checkpoint_path=cfg["output"]["checkpoint_path"],
         )
-        # Log preprocessor artifact
-        pp_path = save_dir / "metadata_preprocessor.pkl"
-        preprocessor.save(str(pp_path))
-        mlflow.log_artifact(str(pp_path), artifact_path="artifacts")
 
-        mlflow.log_metric("best_val_auc_roc", best_auc)
-        print(f"\nTraining complete. Best AUC: {best_auc:.4f}")
+        plot_training_history(history)
+
+        # ── Evaluate ──────────────────────────────────────────────────────
+        acc, auc_score = evaluate_model(
+            model, test["X_tab"], test["X_img"], test["y"]
+        )
+
+        mlflow.log_metrics({"test_accuracy": acc, "test_auc": auc_score})
+
+        # ── Log model with MLflow signature ───────────────────────────────
+        import mlflow.pyfunc
+
+        tab_sample = train["X_tab"][:1]
+        img_sample = train["X_img"][:1]
+
+        signature = mlflow.models.infer_signature(
+            model_input={
+                "image_input":   img_sample,
+                "tabular_input": tab_sample,
+            },
+            model_output=model.predict(
+                {"image_input": img_sample, "tabular_input": tab_sample}
+            ),
+        )
+
+        mlflow.keras.log_model(
+            model,
+            artifact_path="multimodal_isic2024",
+            signature=signature,
+        )
+
+        print(f"\n✅ MLflow run complete — Accuracy: {acc:.4f}, AUC: {auc_score:.4f}")
 
 
-# ─────────────────────────────────────────────
-# Entry Point
-# ─────────────────────────────────────────────
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser()
-    parser.add_argument("--config", type=str, default=None)
-    args = parser.parse_args()
-
-    cfg = DEFAULT_CONFIG.copy()
-    if args.config:
-        with open(args.config) as f:
-            cfg.update(yaml.safe_load(f))
-
-    train(cfg)
+    main()
