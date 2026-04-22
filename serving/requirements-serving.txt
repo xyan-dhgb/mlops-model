@@ -1,5 +1,5 @@
-# requirements.txt – shared base
-tensorflow==2.15.0
+# requirements-serving.txt – inference API, no GPU needed
+tensorflow-cpu==2.15.0
 keras==2.15.0
 numpy>=1.24,<2.0
 pandas>=2.0
@@ -8,10 +8,8 @@ opencv-python-headless>=4.8
 Pillow>=10.0
 h5py>=3.9
 mlflow>=2.10
-matplotlib>=3.7
-seaborn>=0.13
-shap>=0.44
 fastapi>=0.110
 uvicorn[standard]>=0.28
 python-multipart>=0.0.9
 requests>=2.31
+prometheus-fastapi-instrumentator>=6.1

@@ -1,159 +1,161 @@
-# ISIC 2024 – Multimodal Skin Lesion Classifier
+# ISIC 2024 – Multimodal Skin Lesion Classifier (MLOps)
 
-Binary classification of skin lesions (Benign vs Malignant) using a
-**multimodal deep learning model** that fuses dermoscopy images (CNN branch)
-with patient metadata (MLP branch).
+> EfficientNetB3 + MLP + Focal Loss + Two-Phase Training  
+> AUC-ROC: 0.8598 | pAUC: 3.3871 | F1: 0.5587 | Recall: 0.6329 | threshold=0.55
 
-Primary competition metric: **pAUC @ 80% TPR** (normalised partial AUC).
+---
+
+## Architecture
+
+```
+EfficientNetB3 Branch (Image)          MLP Branch (Tabular / 37 features)
+  pretrained ImageNet, top=False         Dense(128, ReLU, Dropout 0.3)
+  GlobalAveragePooling2D → [1536]        Dense(64,  ReLU, Dropout 0.2)
+  BatchNorm → Dense(256, Dropout 0.4)    Dense(32,  ReLU)
+  Dense(128, Dropout 0.3) → [128]        → [32]
+           ↘                           ↙
+            Concatenate [128 + 32 = 160]
+            Fusion Head
+              Dense(128, ReLU, Dropout 0.4)
+              Dense(64,  ReLU, Dropout 0.3)
+              Dense(1, sigmoid) → P(Malignant) ∈ [0, 1]
+```
+
+### Two-Phase Training
+
+| | Phase 1 – Head Training | Phase 2 – Fine-Tuning |
+|---|---|---|
+| Backbone | FROZEN 100% | Unfreeze from layer 300+ |
+| LR | 1e-3 (Adam) | 1e-4 |
+| Loss | Focal Loss γ=2, α=0.75 | same |
+| Monitor | val_auc (maximize) | val_auc (maximize) |
+| Patience | 5 | 7 |
+| Max Epochs | 15 | 15 |
 
 ---
 
 ## Project Structure
 
 ```
-.github/workflows/ml-ci-cd.yml   ← GitHub Actions CI/CD
-docker/
-  Dockerfile                     ← Base image
-  Dockerfile.preprocessing       ← HDF5 extraction + CSV cleaning
-  Dockerfile.training            ← Model training
-  Dockerfile.serving             ← FastAPI inference server
-  mflow/
-    docker-compose.yml           ← MLflow + training + serving stack
-    k8s-mflow.yaml               ← Kubernetes manifests
-MLflow_signature/
-  train.py                       ← MLflow-integrated training entry point
-Multimodal/
-  config/train_config.yaml       ← All hyperparameters & paths
-  data/raw/                      ← ISIC images (HDF5) + CSV metadata
-  data_loader/dataloader.py      ← build_dataloaders()
-  final/                         ← Saved model + preprocessor
-  models/multimodal_model.py     ← build_multimodal_model()
-  preprocessing/
-    image_preprocessing.py       ← CLAHE, augmentation, HDF5 extraction
-    tabular_preprocessing.py     ← Impute, scale, encode
-  training/train.py              ← train_model(), evaluate_model(), XAI
-  utils/
-    metrics.py                   ← pAUC, ROC, metrics table
-    predict.py                   ← Single-sample inference helper
-    serving.py                   ← FastAPI app
-  requirement.txt
-scripts/run_train.py             ← CLI entry point
-src/
-  data_preprocessing.py          ← Public API (re-exports)
-  model.py                       ← Public API (re-exports)
-tests/
-  conftest.py
-  test_data_preprocessing.py
-  test_model.py
-  test_train.py
+isic2024-mlops/
+├── .github/
+│   └── workflows/
+│       └── ml-ci-cd.yml          # CI/CD: lint → test → build → push → deploy
+├── Docker/
+│   ├── Dockerfile                # Base image
+│   ├── Dockerfile.preprocessing  # Stage 1: HDF5 extract + tabular prep
+│   ├── Dockerfile.training       # Stage 2: Two-phase GPU training
+│   ├── Dockerfile.serving        # Stage 3: FastAPI inference API
+│   └── mlflow/
+│       ├── docker-compose.yml    # Full local stack
+│       └── k8s-mlflow.yaml       # Kubernetes manifests
+├── MLflow_signature/
+│   └── train.py                  # MLflow-tracked training entry-point
+├── scripts/
+│   ├── preprocess.py             # Preprocessing Docker entrypoint
+│   └── run_train.py              # Training Docker entrypoint
+├── serving/
+│   └── app.py                    # FastAPI app (predict + Grad-CAM)
+├── src/
+│   ├── data_preprocessing.py     # Image + tabular pipeline
+│   └── model.py                  # Model, loss, trainer, evaluator
+├── tests/
+│   ├── test_data_preprocessing.py
+│   ├── test_model.py
+│   └── test_train.py
+├── requirements.txt
+├── requirements-preprocessing.txt
+├── requirements-serving.txt
+└── requirements-dev.txt
 ```
 
 ---
 
 ## Quick Start
 
-### 1. Install dependencies
+### 1. Local development
+
 ```bash
-pip install -r Multimodal/requirement.txt
+pip install -r requirements-dev.txt
+pytest tests/ -v
 ```
 
-### 2. Prepare data
-Place ISIC 2024 files under `Multimodal/data/raw/`:
-```
-Multimodal/data/raw/
-  train-metadata.csv
-  train-image.hdf5
-```
+### 2. Full Docker stack (local)
 
-### 3. Train locally
 ```bash
-# Without MLflow
-python scripts/run_train.py --no-mlflow
+# Start MLflow tracker
+docker compose -f Docker/mlflow/docker-compose.yml up mlflow -d
 
-# With MLflow (requires MLflow server at localhost:5000)
-python scripts/run_train.py
+# Stage 1: Preprocess
+docker compose -f Docker/mlflow/docker-compose.yml \
+  --profile preprocessing run --rm preprocessing
+
+# Stage 2: Train (requires NVIDIA GPU + nvidia-container-toolkit)
+docker compose -f Docker/mlflow/docker-compose.yml \
+  --profile training run --rm training
+
+# Stage 3: Serve
+docker compose -f Docker/mlflow/docker-compose.yml \
+  --profile serving up serving -d
 ```
 
-### 4. Run tests
+### 3. Standalone training
+
 ```bash
-pytest tests/ -v --cov=Multimodal --cov=src
+python MLflow_signature/train.py \
+  --csv_path   data/train-metadata.csv \
+  --hdf5_path  data/train-image.hdf5  \
+  --image_dir  data/images            \
+  --output_dir models
 ```
 
-### 5. Run with Docker Compose
+### 4. Single prediction
+
 ```bash
-cd docker/mflow
-docker-compose up --build
-```
-
-### 6. Inference API
-```bash
-# After training, start the serving container
-docker build -f docker/Dockerfile.serving -t isic2024-serving .
-docker run -p 8000:8000 \
-  -v $(pwd)/Multimodal/final:/app/Multimodal/final \
-  isic2024-serving
-
-# Health check
-curl http://localhost:8000/health
-
-# Predict
-curl -X POST http://localhost:8000/predict \
-  -F "image=@path/to/lesion.jpg" \
-  -F 'features={"age_approx": 55, "sex": "male", "anatom_site_general": "torso"}'
+curl -X POST http://localhost:8080/predict \
+  -F "image=@lesion.jpg"                   \
+  -F 'metadata={"age_approx":55,"sex":"male","anatom_site_general":"trunk"}'
 ```
 
 ---
 
-## Model Architecture
+## Imbalance Handling (~97% Benign / ~3% Malignant)
 
-```
-Image (224×224×3)              Tabular metadata (N features)
-       │                                    │
-  CNN Branch                           MLP Branch
-  Conv2D(32) → BN → Pool               Dense(128) → Dropout(0.3)
-  Conv2D(64) → BN → Pool               Dense(64)  → Dropout(0.2)
-  Conv2D(128) → BN → Pool              Dense(32)
-  GlobalAvgPool → Dense(128)
-       │                                    │
-       └──────────── Concatenate ───────────┘
-                          │
-                    Dense(128) → Dropout(0.4)
-                    Dense(64)  → Dropout(0.3)
-                          │
-                  sigmoid (binary) / softmax (multi)
-                          │
-                       Output
-```
-
----
-
-## XAI (Explainable AI)
-
-Two complementary explanations are generated per prediction:
-
-| Component | Scope | Method |
-|---|---|---|
-| **Grad-CAM** | Image branch | Gradient-weighted class activation map over the last Conv2D layer |
-| **SHAP** | Tabular branch | DeepExplainer waterfall + bar summary (global importance) |
-
----
-
-## Key Metrics
-
-| Metric | Description |
+| Layer | Strategy |
 |---|---|
-| **pAUC@80%** | Primary – partial AUC at TPR ≥ 80% |
-| AUC-ROC | Overall discriminative ability |
-| Accuracy | Overall correctness |
-| Sensitivity | True positive rate (recall for malignant) |
-| Specificity | True negative rate |
+| 1 | Oversampling (Malignant ×strong_aug, target_ratio=0.25) |
+| 2 | Class weight ×1.2 for Malignant (avoids triple-penalty bias) |
+| 3 | Focal Loss FL = −α(1−p)^γ log(p), γ=2.0, α=0.75 |
+
+---
+
+## Explainability (XAI)
+
+- **Grad-CAM** – heatmap overlay on lesion image (served inline via `/predict`)
+- **SHAP DeepExplainer** – waterfall plot for tabular features  
+- **`MultimodalXAIRunner`** – unified runner returning both explanations
 
 ---
 
 ## CI/CD Pipeline
 
 ```
-Push → Lint (Black / Flake8) → Unit Tests → Build Docker images
-                                               └─ Deploy to k8s (main only)
-                                               └─ Manual training trigger
+push → lint (flake8/mypy)
+     → unit tests (pytest)
+     → integration smoke-test
+     → docker build (preprocessing / training / serving)
+     → push to GHCR  [main only]
+     → rolling update K8s serving deployment  [main only]
+```
+
+---
+
+## Key Results (Best Phase 2 Epoch)
+
+```
+AUC-ROC : 0.8598
+pAUC    : 3.3871  (TPR ≥ 80%, ISIC 2024 primary metric)
+F1      : 0.5587  (Malignant)
+Recall  : 0.6329  (Malignant)
+Threshold: 0.55
 ```

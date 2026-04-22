@@ -1,4 +1,23 @@
-name: ML CI/CD Pipeline – ISIC 2024 Multimodal
+# ============================================================
+# .github/workflows/ml-ci-cd.yml
+# ============================================================
+# CI/CD pipeline for ISIC 2024 Multimodal Skin Lesion Classifier
+#
+# Triggers
+# ────────
+#   push → main / develop
+#   pull_request → main
+#   workflow_dispatch (manual)
+#
+# Jobs
+# ────
+#   lint-test    – flake8 + pytest (unit + integration smoke)
+#   build-images – Docker build for preprocessing / training / serving
+#   push-images  – Push to GHCR on main branch
+#   deploy-k8s   – Rolling update of serving deployment on main
+# ============================================================
+
+name: ISIC 2024 ML CI/CD
 
 on:
   push:
@@ -6,179 +25,171 @@ on:
   pull_request:
     branches: [main]
   workflow_dispatch:
-    inputs:
-      run_training:
-        description: "Trigger full model training"
-        required: false
-        default: "false"
-        type: boolean
 
 env:
-  PYTHON_VERSION: "3.11"
-  IMAGE_REGISTRY: ghcr.io/${{ github.repository_owner }}
-  TRAINING_IMAGE: isic2024-training
-  SERVING_IMAGE: isic2024-serving
+  REGISTRY: ghcr.io
+  IMAGE_BASE: ${{ github.repository_owner }}/isic2024
 
 jobs:
-  # ────────────────────────────────────────────────────────────────────────────
-  # 1. Lint & static analysis
-  # ────────────────────────────────────────────────────────────────────────────
-  lint:
-    name: Lint & Type Check
+  # ── 1. Lint + Unit Tests ──────────────────────────────────────────────────
+  lint-test:
+    name: Lint & Unit Tests
     runs-on: ubuntu-latest
+
     steps:
       - uses: actions/checkout@v4
 
-      - name: Set up Python ${{ env.PYTHON_VERSION }}
+      - name: Set up Python 3.11
         uses: actions/setup-python@v5
         with:
-          python-version: ${{ env.PYTHON_VERSION }}
-          cache: pip
-
-      - name: Install lint tools
-        run: pip install flake8 black isort mypy
-
-      - name: Black format check
-        run: black --check --diff .
-
-      - name: Flake8 lint
-        run: flake8 . --max-line-length=120 --exclude=.git,__pycache__,.venv
-
-      - name: isort import order
-        run: isort --check-only --diff .
-
-  # ────────────────────────────────────────────────────────────────────────────
-  # 2. Unit & integration tests
-  # ────────────────────────────────────────────────────────────────────────────
-  test:
-    name: Unit Tests
-    runs-on: ubuntu-latest
-    needs: lint
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Set up Python ${{ env.PYTHON_VERSION }}
-        uses: actions/setup-python@v5
-        with:
-          python-version: ${{ env.PYTHON_VERSION }}
+          python-version: "3.11"
           cache: pip
 
       - name: Install dependencies
         run: |
           pip install --upgrade pip
-          pip install -r Multimodal/requirement.txt
-          pip install pytest pytest-cov
+          pip install -r requirements-dev.txt
 
-      - name: Run tests with coverage
+      - name: Lint with flake8
         run: |
-          pytest tests/ \
-            --cov=Multimodal \
-            --cov=src \
-            --cov-report=xml \
-            --cov-report=term-missing \
-            -v
+          flake8 src/ tests/ MLflow_signature/ scripts/ \
+            --max-line-length=120 \
+            --ignore=E203,W503,E501
 
-      - name: Upload coverage report
-        uses: codecov/codecov-action@v4
+      - name: Type check with mypy
+        run: |
+          mypy src/ --ignore-missing-imports --no-strict-optional
+        continue-on-error: true
+
+      - name: Run unit tests
+        env:
+          TF_CPP_MIN_LOG_LEVEL: "3"
+        run: |
+          pytest tests/test_data_preprocessing.py tests/test_model.py \
+            -v --tb=short \
+            --junitxml=test-results/unit.xml \
+            -x
+
+      - name: Run integration smoke test
+        env:
+          TF_CPP_MIN_LOG_LEVEL: "3"
+        run: |
+          pytest tests/test_train.py \
+            -v --tb=short \
+            --junitxml=test-results/integration.xml \
+            -x
+
+      - name: Upload test results
+        uses: actions/upload-artifact@v4
+        if: always()
         with:
-          file: coverage.xml
-          fail_ci_if_error: false
+          name: test-results
+          path: test-results/
 
-  # ────────────────────────────────────────────────────────────────────────────
-  # 3. Build Docker images
-  # ────────────────────────────────────────────────────────────────────────────
-  build:
+  # ── 2. Build Docker Images ───────────────────────────────────────────────
+  build-images:
     name: Build Docker Images
     runs-on: ubuntu-latest
-    needs: test
-    permissions:
-      contents: read
-      packages: write
+    needs: lint-test
+
+    strategy:
+      matrix:
+        image:
+          - name: preprocessing
+            dockerfile: Docker/Dockerfile.preprocessing
+          - name: training
+            dockerfile: Docker/Dockerfile.training
+          - name: serving
+            dockerfile: Docker/Dockerfile.serving
+
     steps:
       - uses: actions/checkout@v4
-
-      - name: Log in to GitHub Container Registry
-        uses: docker/login-action@v3
-        with:
-          registry: ghcr.io
-          username: ${{ github.actor }}
-          password: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
 
-      - name: Build & push training image
+      - name: Extract metadata
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.REGISTRY }}/${{ env.IMAGE_BASE }}-${{ matrix.image.name }}
+          tags: |
+            type=ref,event=branch
+            type=sha,prefix=sha-
+            type=raw,value=latest,enable={{is_default_branch}}
+
+      - name: Build image (no push)
         uses: docker/build-push-action@v5
         with:
           context: .
-          file: docker/Dockerfile.training
-          push: ${{ github.ref == 'refs/heads/main' }}
-          tags: |
-            ${{ env.IMAGE_REGISTRY }}/${{ env.TRAINING_IMAGE }}:latest
-            ${{ env.IMAGE_REGISTRY }}/${{ env.TRAINING_IMAGE }}:${{ github.sha }}
+          file: ${{ matrix.image.dockerfile }}
+          push: false
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
 
-      - name: Build & push serving image
-        uses: docker/build-push-action@v5
-        with:
-          context: .
-          file: docker/Dockerfile.serving
-          push: ${{ github.ref == 'refs/heads/main' }}
-          tags: |
-            ${{ env.IMAGE_REGISTRY }}/${{ env.SERVING_IMAGE }}:latest
-            ${{ env.IMAGE_REGISTRY }}/${{ env.SERVING_IMAGE }}:${{ github.sha }}
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
-
-  # ────────────────────────────────────────────────────────────────────────────
-  # 4. Model training (manual trigger or push to main with input flag)
-  # ────────────────────────────────────────────────────────────────────────────
-  train:
-    name: Train Model
+  # ── 3. Push Docker Images (main only) ───────────────────────────────────
+  push-images:
+    name: Push Docker Images
     runs-on: ubuntu-latest
-    needs: build
-    if: >
-      github.event_name == 'workflow_dispatch' &&
-      github.event.inputs.run_training == 'true'
+    needs: build-images
+    if: github.ref == 'refs/heads/main'
+    permissions:
+      contents: read
+      packages: write
+
+    strategy:
+      matrix:
+        image:
+          - name: preprocessing
+            dockerfile: Docker/Dockerfile.preprocessing
+          - name: training
+            dockerfile: Docker/Dockerfile.training
+          - name: serving
+            dockerfile: Docker/Dockerfile.serving
+
     steps:
       - uses: actions/checkout@v4
 
-      - name: Set up Python ${{ env.PYTHON_VERSION }}
-        uses: actions/setup-python@v5
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
         with:
-          python-version: ${{ env.PYTHON_VERSION }}
-          cache: pip
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Install dependencies
-        run: |
-          pip install --upgrade pip
-          pip install -r Multimodal/requirement.txt
-
-      - name: Run training pipeline (no-mlflow mode for CI)
-        env:
-          PYTHONPATH: .
-        run: |
-          python scripts/run_train.py \
-            --config Multimodal/config/train_config.yaml \
-            --no-mlflow
-
-      - name: Upload model checkpoint
-        uses: actions/upload-artifact@v4
+      - name: Extract metadata
+        id: meta
+        uses: docker/metadata-action@v5
         with:
-          name: model-checkpoint-${{ github.sha }}
-          path: Multimodal/final/
-          retention-days: 30
+          images: ${{ env.REGISTRY }}/${{ env.IMAGE_BASE }}-${{ matrix.image.name }}
+          tags: |
+            type=sha,prefix=sha-
+            type=raw,value=latest
 
-  # ────────────────────────────────────────────────────────────────────────────
-  # 5. Deploy serving (only on main branch after build succeeds)
-  # ────────────────────────────────────────────────────────────────────────────
-  deploy:
-    name: Deploy Serving API
+      - name: Build and push
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          file: ${{ matrix.image.dockerfile }}
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+  # ── 4. Deploy to Kubernetes (main only) ─────────────────────────────────
+  deploy-k8s:
+    name: Deploy Serving to K8s
     runs-on: ubuntu-latest
-    needs: build
-    if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+    needs: push-images
+    if: github.ref == 'refs/heads/main'
     environment: production
+
     steps:
       - uses: actions/checkout@v4
 
@@ -188,23 +199,20 @@ jobs:
           method: kubeconfig
           kubeconfig: ${{ secrets.KUBECONFIG }}
 
-      - name: Update serving image tag in k8s manifest
+      - name: Set image SHA
         run: |
-          sed -i "s|isic2024-serving:latest|${{ env.IMAGE_REGISTRY }}/${{ env.SERVING_IMAGE }}:${{ github.sha }}|g" \
-            docker/mflow/k8s-mflow.yaml
-
-      - name: Apply Kubernetes manifests
-        run: |
-          kubectl apply -f docker/mflow/k8s-mflow.yaml
+          IMAGE_TAG=${{ env.REGISTRY }}/${{ env.IMAGE_BASE }}-serving:sha-${{ github.sha }}
+          kubectl set image deployment/isic-serving \
+            serving=${IMAGE_TAG} \
+            -n isic2024
 
       - name: Wait for rollout
         run: |
-          kubectl rollout status deployment/isic2024-serving \
-            -n mlops-isic2024 --timeout=300s
+          kubectl rollout status deployment/isic-serving \
+            -n isic2024 \
+            --timeout=300s
 
-      - name: Smoke test serving endpoint
+      - name: Verify health
         run: |
-          SVC_IP=$(kubectl get svc isic2024-serving-service \
-            -n mlops-isic2024 \
-            -o jsonpath='{.status.loadBalancer.ingress[0].ip}')
-          curl --fail --silent "http://${SVC_IP}/health" | jq .
+          SERVING_IP=$(kubectl get svc serving-svc -n isic2024 -o jsonpath='{.status.loadBalancer.ingress[0].ip}')
+          curl -f http://${SERVING_IP}/health

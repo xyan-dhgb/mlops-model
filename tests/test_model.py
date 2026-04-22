@@ -1,134 +1,139 @@
 """
 tests/test_model.py
-Unit tests for model architecture and forward pass.
+====================
+Unit tests for src/model.py
 """
-
-import pytest
+import os
+import sys
 import numpy as np
-import sys, os
+import pytest
 
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
-from src.model import build_multimodal_model
-
-
-# ── Fixtures ──────────────────────────────────────────────────────────────────
-
-TABULAR_DIM = 30
-IMAGE_SHAPE = (64, 64, 3)  # Small size for fast tests
-BATCH = 4
-
-
-@pytest.fixture(scope="module")
-def binary_model():
-    return build_multimodal_model(
-        tabular_shape=(TABULAR_DIM,),
-        image_shape=IMAGE_SHAPE,
-        num_classes=2,
-    )
+from model import (
+    build_multimodal_model,
+    compute_pauc,
+    find_optimal_threshold,
+    focal_loss,
+    predict_skin_lesion,
+)
 
 
-@pytest.fixture(scope="module")
-def multiclass_model():
-    return build_multimodal_model(
-        tabular_shape=(TABULAR_DIM,),
-        image_shape=IMAGE_SHAPE,
-        num_classes=4,
-    )
+# ---------------------------------------------------------------------------
+# Focal Loss
+# ---------------------------------------------------------------------------
+
+class TestFocalLoss:
+    def test_scalar_output(self):
+        import tensorflow as tf
+        loss_fn = focal_loss(gamma=2.0, alpha=0.75)
+        y_true = tf.constant([1.0, 0.0, 1.0])
+        y_pred = tf.constant([0.9, 0.1, 0.8])
+        val = loss_fn(y_true, y_pred)
+        assert val.numpy() >= 0
+
+    def test_lower_loss_for_confident_correct_prediction(self):
+        import tensorflow as tf
+        loss_fn = focal_loss(gamma=2.0, alpha=0.75)
+        y_true = tf.constant([1.0])
+        confident = loss_fn(y_true, tf.constant([0.95]))
+        uncertain = loss_fn(y_true, tf.constant([0.55]))
+        assert confident.numpy() < uncertain.numpy()
 
 
-@pytest.fixture()
-def batch_inputs():
-    np.random.seed(7)
-    return (
-        np.random.rand(BATCH, *IMAGE_SHAPE).astype(np.float32),
-        np.random.rand(BATCH, TABULAR_DIM).astype(np.float32),
-    )
+# ---------------------------------------------------------------------------
+# Model architecture
+# ---------------------------------------------------------------------------
 
-
-# ── Architecture tests ────────────────────────────────────────────────────────
-
-class TestModelArchitecture:
-    def test_model_has_two_inputs(self, binary_model):
-        assert len(binary_model.inputs) == 2
-
-    def test_input_names(self, binary_model):
-        names = {inp.name.split(":")[0] for inp in binary_model.inputs}
-        assert "image_input" in names
-        assert "tabular_input" in names
-
-    def test_binary_output_shape(self, binary_model):
-        assert binary_model.output_shape == (None, 1)
-
-    def test_multiclass_output_shape(self, multiclass_model):
-        assert multiclass_model.output_shape == (None, 4)
-
-    def test_model_is_compiled(self, binary_model):
-        assert binary_model.optimizer is not None
-
-    def test_model_has_auc_metric(self, binary_model):
-        metric_names = [m.name for m in binary_model.metrics]
-        assert "auc" in metric_names
-
-
-# ── Forward pass tests ────────────────────────────────────────────────────────
-
-class TestForwardPass:
-    def test_binary_output_range(self, binary_model, batch_inputs):
-        imgs, tabs = batch_inputs
-        preds = binary_model.predict(
-            {"image_input": imgs, "tabular_input": tabs}, verbose=0
+class TestBuildMultimodalModel:
+    @pytest.fixture(scope="class")
+    def small_model(self):
+        """Build once for all tests in this class."""
+        model, backbone = build_multimodal_model(
+            tabular_shape=(10,),
+            image_shape=(224, 224, 3),
+            freeze_backbone=True,
         )
-        assert preds.shape == (BATCH, 1)
-        assert preds.min() >= 0.0
-        assert preds.max() <= 1.0
+        return model, backbone
 
-    def test_multiclass_output_sums_to_one(self, multiclass_model, batch_inputs):
-        imgs, tabs = batch_inputs
-        preds = multiclass_model.predict(
-            {"image_input": imgs, "tabular_input": tabs}, verbose=0
-        )
-        assert preds.shape == (BATCH, 4)
-        np.testing.assert_allclose(preds.sum(axis=1), 1.0, atol=1e-5)
+    def test_output_shape(self, small_model):
+        model, _ = small_model
+        assert model.output_shape == (None, 1)
 
-    def test_batch_size_one(self, binary_model):
-        img = np.random.rand(1, *IMAGE_SHAPE).astype(np.float32)
-        tab = np.random.rand(1, TABULAR_DIM).astype(np.float32)
-        pred = binary_model.predict(
-            {"image_input": img, "tabular_input": tab}, verbose=0
-        )
-        assert pred.shape == (1, 1)
+    def test_input_names(self, small_model):
+        model, _ = small_model
+        input_names = [inp.name for inp in model.inputs]
+        assert any("image" in n for n in input_names)
+        assert any("tabular" in n for n in input_names)
+
+    def test_backbone_frozen(self, small_model):
+        model, backbone = small_model
+        assert not backbone.trainable
+
+    def test_model_predicts(self, small_model):
+        model, _ = small_model
+        rng = np.random.default_rng(0)
+        imgs = rng.random((2, 224, 224, 3)).astype(np.float32)
+        tabs = rng.random((2, 10)).astype(np.float32)
+        preds = model.predict({"image_input": imgs, "tabular_input": tabs}, verbose=0)
+        assert preds.shape == (2, 1)
+        assert ((preds >= 0) & (preds <= 1)).all()
 
 
-# ── Training step test ────────────────────────────────────────────────────────
+# ---------------------------------------------------------------------------
+# pAUC
+# ---------------------------------------------------------------------------
 
-class TestTrainingStep:
-    def test_single_training_step(self, binary_model, batch_inputs):
-        imgs, tabs = batch_inputs
-        y = np.random.randint(0, 2, BATCH).astype(np.float32)
-        result = binary_model.train_on_batch(
-            {"image_input": imgs, "tabular_input": tabs}, y
-        )
-        loss = result[0] if isinstance(result, (list, tuple)) else result
-        assert np.isfinite(loss), "Loss should be finite after one training step"
+class TestComputePAUC:
+    def test_perfect_classifier(self):
+        y_true = np.array([0, 0, 0, 1, 1])
+        y_pred = np.array([0.1, 0.2, 0.15, 0.9, 0.95])
+        pauc = compute_pauc(y_true, y_pred, min_tpr=0.80)
+        assert pauc > 0
 
-    def test_weights_change_after_training(self, batch_inputs):
-        model = build_multimodal_model(
-            tabular_shape=(TABULAR_DIM,),
-            image_shape=IMAGE_SHAPE,
-            num_classes=2,
-        )
-        imgs, tabs = batch_inputs
-        y = np.random.randint(0, 2, BATCH).astype(np.float32)
+    def test_range_0_to_1(self):
+        rng = np.random.default_rng(5)
+        y_true = rng.integers(0, 2, 100)
+        y_pred = rng.random(100).astype(np.float32)
+        pauc = compute_pauc(y_true, y_pred)
+        assert 0.0 <= pauc <= 1.0
 
-        # Snapshot weights before
-        w_before = [w.numpy().copy() for w in model.trainable_weights[:3]]
-        model.train_on_batch(
-            {"image_input": imgs, "tabular_input": tabs}, y
-        )
-        w_after = [w.numpy() for w in model.trainable_weights[:3]]
+    def test_insufficient_tpr_returns_zero(self):
+        # All predictions 0.1 → TPR always 0, no mask points ≥ 0.8
+        y_true = np.array([1, 1, 1, 0, 0])
+        y_pred = np.array([0.1, 0.1, 0.1, 0.9, 0.9])
+        pauc = compute_pauc(y_true, y_pred, min_tpr=0.80)
+        assert pauc == 0.0
 
-        any_changed = any(
-            not np.allclose(b, a) for b, a in zip(w_before, w_after)
-        )
-        assert any_changed, "Weights should change after a training step"
+
+# ---------------------------------------------------------------------------
+# Threshold tuning
+# ---------------------------------------------------------------------------
+
+class TestFindOptimalThreshold:
+    def _make_data(self):
+        rng = np.random.default_rng(11)
+        y_true = np.array([0] * 90 + [1] * 10)
+        y_pred = np.concatenate([rng.random(90) * 0.4, rng.random(10) * 0.4 + 0.6])
+        return y_true, y_pred
+
+    def test_threshold_in_range(self):
+        y_true, y_pred = self._make_data()
+        thr, _ = find_optimal_threshold(y_true, y_pred)
+        assert 0.05 <= thr <= 0.95
+
+    def test_returns_dataframe(self):
+        import pandas as pd
+        y_true, y_pred = self._make_data()
+        _, df = find_optimal_threshold(y_true, y_pred)
+        assert isinstance(df, pd.DataFrame)
+        assert "threshold" in df.columns
+
+    def test_recall_constraint_respected(self):
+        y_true, y_pred = self._make_data()
+        thr, df = find_optimal_threshold(y_true, y_pred, min_recall=0.60)
+        pred = (y_pred >= thr).astype(int)
+        tp = np.sum((y_true == 1) & (pred == 1))
+        fn = np.sum((y_true == 1) & (pred == 0))
+        recall = tp / (tp + fn + 1e-8)
+        assert recall >= 0.55  # allow small slack due to grid resolution

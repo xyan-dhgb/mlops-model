@@ -1,21 +1,50 @@
-FROM python:3.11-slim
+# ============================================================
+# Dockerfile.serving
+# ============================================================
+# Stage 3 of the multimodal pipeline – REST inference API:
+#
+#   POST /predict  –  predict_skin_lesion()
+#     Input : multipart (image file) + JSON metadata
+#     Output: { diagnosis, probability_malignant, confidence,
+#               threshold, gradcam_overlay_b64 }
+#
+#   GET  /health   –  liveness probe
+#   GET  /metrics  –  Prometheus endpoint (optional)
+#
+# Model loading: reads /models/multimodal_model.keras +
+#                /models/preprocessors.pkl at startup.
+# ============================================================
+
+FROM tensorflow/tensorflow:2.15.0
+
+LABEL stage="serving"
+LABEL description="ISIC 2024 – FastAPI inference server"
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    libgl1-mesa-glx \
+    libglib2.0-0 \
+    && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
 
-RUN apt-get update && apt-get install -y --no-install-recommends \
-    libglib2.0-0 libsm6 libxext6 libxrender-dev libgomp1 \
-    && rm -rf /var/lib/apt/lists/*
+COPY requirements-serving.txt requirements.txt
+RUN pip install --no-cache-dir --upgrade pip && \
+    pip install --no-cache-dir -r requirements.txt
 
-COPY Multimodal/requirement.txt ./requirements.txt
-RUN pip install --no-cache-dir -r requirements.txt
-RUN pip install --no-cache-dir fastapi uvicorn python-multipart
+COPY src/    src/
+COPY serving/ serving/
 
-COPY . .
+ENV PYTHONPATH="/app/src:${PYTHONPATH}"
+ENV TF_CPP_MIN_LOG_LEVEL=3
+ENV MODEL_PATH=/models/multimodal_model.keras
+ENV PREPROCESSORS_PATH=/models/preprocessors.pkl
+ENV THRESHOLD=0.55
+ENV HOST=0.0.0.0
+ENV PORT=8080
 
-ENV PYTHONPATH=/app
-ENV MODEL_PATH=Multimodal/final/best_model.h5
-ENV PREPROCESSOR_PATH=Multimodal/final/preprocessor.pkl
+EXPOSE 8080
 
-EXPOSE 8000
+HEALTHCHECK --interval=30s --timeout=10s --start-period=60s --retries=3 \
+    CMD curl -f http://localhost:8080/health || exit 1
 
-CMD ["uvicorn", "Multimodal.utils.serving:app", "--host", "0.0.0.0", "--port", "8000"]
+CMD ["uvicorn", "serving.app:app", "--host", "0.0.0.0", "--port", "8080", "--workers", "2"]

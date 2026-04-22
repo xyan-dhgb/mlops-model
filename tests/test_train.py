@@ -1,161 +1,130 @@
 """
 tests/test_train.py
-Integration tests for train_model and evaluate_model.
-Uses small synthetic data to keep tests fast.
+====================
+Integration smoke-test for the full training pipeline.
+Runs with tiny synthetic data – no real HDF5/CSV required.
 """
-
-import pytest
+import os
+import sys
+import tempfile
 import numpy as np
-import sys, os
+import pandas as pd
+import pytest
 
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
-from src.model import build_multimodal_model, train_model, evaluate_model
+from data_preprocessing import (
+    build_tabular_features,
+    oversample_malignant,
+    stratified_split,
+)
+from model import (
+    IMAGE_SHAPE,
+    build_multimodal_model,
+    evaluate_model,
+    train_model,
+)
 
 
-# ── Constants ─────────────────────────────────────────────────────────────────
+# ---------------------------------------------------------------------------
+# Fixtures
+# ---------------------------------------------------------------------------
 
-N_TRAIN = 40
-N_VAL   = 10
-N_TEST  = 10
-TAB_DIM = 15
-IMG_SHP = (32, 32, 3)   # Tiny images for speed
-
-
-# ── Fixtures ──────────────────────────────────────────────────────────────────
-
-@pytest.fixture(scope="module")
-def synthetic_data():
-    np.random.seed(0)
-
-    def _make(n):
-        imgs = np.random.rand(n, *IMG_SHP).astype(np.float32)
-        tabs = np.random.rand(n, TAB_DIM).astype(np.float32)
-        # Ensure both classes present
-        y = np.array([0] * (n // 2) + [1] * (n - n // 2), dtype=np.float32)
-        np.random.shuffle(y)
-        return tabs, imgs, y
-
-    return {
-        "train": _make(N_TRAIN),
-        "val":   _make(N_VAL),
-        "test":  _make(N_TEST),
-    }
+N_SAMPLES = 50   # tiny dataset for fast CI
+N_BEN, N_MAL = 45, 5
 
 
 @pytest.fixture(scope="module")
-def trained_model(synthetic_data, tmp_path_factory):
-    tmp = tmp_path_factory.mktemp("checkpoints")
-    model = build_multimodal_model(
-        tabular_shape=(TAB_DIM,),
-        image_shape=IMG_SHP,
-        num_classes=2,
+def synthetic_dataset():
+    """Return (X_tab, X_img, y) with correct shapes."""
+    rng = np.random.default_rng(42)
+    n = N_BEN + N_MAL
+    X_img = rng.random((n, 224, 224, 3), dtype=np.float64).astype(np.float32)
+    X_tab = rng.random((n, 15)).astype(np.float32)
+    y = np.array([0] * N_BEN + [1] * N_MAL, dtype=np.int32)
+    return X_tab, X_img, y
+
+
+@pytest.fixture(scope="module")
+def compiled_model():
+    model, backbone = build_multimodal_model(
+        tabular_shape=(15,),
+        image_shape=IMAGE_SHAPE,
+        freeze_backbone=True,
     )
-    train = synthetic_data["train"]
-    val   = synthetic_data["val"]
-
-    train_model(
-        model,
-        X_tab_train=train[0], X_img_train=train[1], y_train=train[2],
-        X_tab_val=val[0],     X_img_val=val[1],     y_val=val[2],
-        epochs=2,
-        batch_size=8,
-        checkpoint_path=str(tmp / "best.h5"),
-    )
-    return model
+    return model, backbone
 
 
-# ── train_model tests ─────────────────────────────────────────────────────────
+# ---------------------------------------------------------------------------
+# Smoke tests
+# ---------------------------------------------------------------------------
 
-class TestTrainModel:
-    def test_history_has_loss(self, trained_model, synthetic_data):
-        # Re-run a 1-epoch training to get a fresh History object
-        model = build_multimodal_model(
-            tabular_shape=(TAB_DIM,), image_shape=IMG_SHP, num_classes=2
+class TestTrainingPipeline:
+    def test_stratified_split_sizes(self, synthetic_dataset):
+        X_tab, X_img, y = synthetic_dataset
+        splits = stratified_split(X_tab, X_img, y)
+        total = sum(len(splits[k][2]) for k in ["train", "val", "test"])
+        assert total == len(y)
+
+    def test_oversampling_increases_size(self, synthetic_dataset):
+        X_tab, X_img, y = synthetic_dataset
+        X_img_os, X_tab_os, y_os = oversample_malignant(
+            X_img, X_tab, y, target_ratio=0.25, strong_aug=False
         )
-        train = synthetic_data["train"]
-        val   = synthetic_data["val"]
-        import tempfile, pathlib
-        with tempfile.TemporaryDirectory() as td:
-            history = train_model(
-                model,
-                train[0], train[1], train[2],
-                val[0],   val[1],   val[2],
-                epochs=1, batch_size=8,
-                checkpoint_path=str(pathlib.Path(td) / "best.h5"),
+        assert len(y_os) >= len(y)
+
+    def test_model_output_shape(self, compiled_model, synthetic_dataset):
+        model, _ = compiled_model
+        X_tab, X_img, y = synthetic_dataset
+        preds = model.predict(
+            {"image_input": X_img[:4], "tabular_input": X_tab[:4]},
+            verbose=0,
+        )
+        assert preds.shape == (4, 1)
+
+    def test_phase1_training_runs(self, compiled_model, synthetic_dataset):
+        """Phase 1 training should complete without errors."""
+        model, backbone = compiled_model
+        X_tab, X_img, y = synthetic_dataset
+
+        splits = stratified_split(X_tab, X_img, y)
+        X_tab_tr, X_img_tr, y_tr = splits["train"]
+        X_tab_vl, X_img_vl, y_vl = splits["val"]
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            h1, h2 = train_model(
+                model, backbone,
+                X_tab_tr, X_img_tr, y_tr,
+                X_tab_vl, X_img_vl, y_vl,
+                phase1_epochs=1,
+                phase2_epochs=1,
+                batch_size=8,
+                run_phase2=False,   # skip phase2 for speed
+                checkpoint_dir=tmpdir,
+                oversample_ratio=0.25,
             )
-        assert "loss" in history.history
-        assert len(history.history["loss"]) >= 1
+        assert "val_auc" in h1.history
+        assert h2 is None  # phase2 skipped
 
-    def test_history_has_val_auc(self, synthetic_data):
-        model = build_multimodal_model(
-            tabular_shape=(TAB_DIM,), image_shape=IMG_SHP, num_classes=2
+    def test_evaluate_model_keys(self, compiled_model, synthetic_dataset):
+        model, _ = compiled_model
+        X_tab, X_img, y = synthetic_dataset
+        splits = stratified_split(X_tab, X_img, y)
+        X_tab_te, X_img_te, y_te = splits["test"]
+
+        metrics = evaluate_model(
+            model, X_tab_te, X_img_te, y_te,
+            auto_tune_threshold=True,
         )
-        train = synthetic_data["train"]
-        val   = synthetic_data["val"]
-        import tempfile, pathlib
-        with tempfile.TemporaryDirectory() as td:
-            history = train_model(
-                model,
-                train[0], train[1], train[2],
-                val[0],   val[1],   val[2],
-                epochs=1, batch_size=8,
-                checkpoint_path=str(pathlib.Path(td) / "best.h5"),
-            )
-        assert "val_auc" in history.history
+        required = {"auc_roc", "pauc_tpr80", "f1_malignant", "recall_malignant", "threshold"}
+        assert required.issubset(metrics.keys())
 
-    def test_checkpoint_created(self, synthetic_data):
-        model = build_multimodal_model(
-            tabular_shape=(TAB_DIM,), image_shape=IMG_SHP, num_classes=2
-        )
-        train = synthetic_data["train"]
-        val   = synthetic_data["val"]
-        import tempfile, pathlib
-        with tempfile.TemporaryDirectory() as td:
-            ckpt = str(pathlib.Path(td) / "best.h5")
-            train_model(
-                model,
-                train[0], train[1], train[2],
-                val[0],   val[1],   val[2],
-                epochs=1, batch_size=8,
-                checkpoint_path=ckpt,
-            )
-            assert pathlib.Path(ckpt).exists(), "Checkpoint file must be created"
+    def test_all_metrics_in_valid_range(self, compiled_model, synthetic_dataset):
+        model, _ = compiled_model
+        X_tab, X_img, y = synthetic_dataset
+        splits = stratified_split(X_tab, X_img, y)
+        X_tab_te, X_img_te, y_te = splits["test"]
 
-
-# ── evaluate_model tests ──────────────────────────────────────────────────────
-
-class TestEvaluateModel:
-    def test_returns_accuracy_and_auc(self, trained_model, synthetic_data):
-        test = synthetic_data["test"]
-        acc, auc_score = evaluate_model(
-            trained_model, test[0], test[1], test[2]
-        )
-        assert 0.0 <= acc <= 1.0
-        assert 0.0 <= auc_score <= 1.0
-
-    def test_accuracy_is_float(self, trained_model, synthetic_data):
-        test = synthetic_data["test"]
-        acc, _ = evaluate_model(trained_model, test[0], test[1], test[2])
-        assert isinstance(acc, float)
-
-    def test_auc_is_float(self, trained_model, synthetic_data):
-        test = synthetic_data["test"]
-        _, auc_score = evaluate_model(trained_model, test[0], test[1], test[2])
-        assert isinstance(auc_score, float)
-
-    def test_perfect_model_high_accuracy(self):
-        """A model that always predicts 0 on all-0 labels should score acc=1."""
-        model = build_multimodal_model(
-            tabular_shape=(TAB_DIM,), image_shape=IMG_SHP, num_classes=2
-        )
-        # All-benign labels; model output close to 0
-        n = 20
-        imgs = np.zeros((n, *IMG_SHP), dtype=np.float32)
-        tabs = np.zeros((n, TAB_DIM), dtype=np.float32)
-        y    = np.zeros(n, dtype=np.float32)
-
-        # Bias output toward 0 by setting last-layer bias
-        # (just checks that evaluate_model runs without error on edge case)
-        acc, auc_score = evaluate_model(model, tabs, imgs, y)
-        assert np.isfinite(acc)
+        metrics = evaluate_model(model, X_tab_te, X_img_te, y_te)
+        for key in ["auc_roc", "pauc_tpr80", "f1_malignant", "recall_malignant"]:
+            assert 0.0 <= metrics[key] <= 1.0, f"{key}={metrics[key]} out of [0,1]"

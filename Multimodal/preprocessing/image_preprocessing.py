@@ -1,180 +1,264 @@
 """
-Image Preprocessing for ISIC 2024
-Covers: load, CLAHE, Gaussian blur, contrast enhancement, augmentation.
+preprocessing/image_preprocessing.py
+=====================================
+Image loading, preprocessing, and augmentation for ISIC 2024.
+
+Functions
+---------
+load_image            : Load an image file → np.ndarray (H, W, 3) float32
+preprocess_image      : CLAHE + Gaussian + contrast enhancement
+augment_image         : Random geometric / photometric augmentation
+oversample_malignant  : Oversample minority class with strong augmentation
+extract_images_from_hdf5 : Dump ISIC HDF5 to individual JPEG files
 """
 
-import cv2
+import os
+import random
 import numpy as np
+import cv2
+import h5py
 from PIL import Image, ImageEnhance
-from pathlib import Path
 
 
-# ── Core helpers ─────────────────────────────────────────────────────────────
+# ── LOAD ─────────────────────────────────────────────────────────────────────
 
-def load_image(
-    image_path: str,
-    target_size: tuple = (224, 224),
-    color_mode: str = "rgb"
-) -> np.ndarray | None:
+def load_image(image_path: str,
+               target_size: tuple = (224, 224),
+               color_mode: str = "rgb") -> np.ndarray | None:
     """
-    Load and resize an image file.
+    Load an image from disk and resize to target_size.
 
-    Args:
-        image_path:  Path to the image.
-        target_size: (width, height) to resize to.
-        color_mode:  'rgb', 'grayscale', or 'rgba'.
-
-    Returns:
-        float32 numpy array in [0, 1], or None on error.
+    Returns
+    -------
+    np.ndarray shape (H, W, 3) dtype float32, or None on failure.
     """
     try:
         img = Image.open(image_path)
-        mode_map = {"rgb": "RGB", "grayscale": "L", "rgba": "RGBA"}
-        img = img.convert(mode_map.get(color_mode.lower(), "RGB"))
-        img = img.resize(target_size, Image.Resampling.LANCZOS)
-        arr = np.array(img, dtype=np.float32) / 255.0
-        return arr
-    except Exception as exc:
-        print(f"[load_image] Error loading {image_path}: {exc}")
+        if color_mode == "rgb":
+            img = img.convert("RGB")
+        elif color_mode == "gray":
+            img = img.convert("L")
+        img = img.resize(target_size, Image.LANCZOS)
+        return np.array(img, dtype=np.float32)
+    except Exception as e:
+        print(f"[load_image] ERROR loading {image_path}: {e}")
         return None
 
 
-def preprocess_image(
-    img_array: np.ndarray,
-    apply_clahe: bool = True,
-    apply_gaussian: bool = True,
-    enhance_contrast: float = 1.2
-) -> np.ndarray | None:
-    """
-    Apply CLAHE, Gaussian blur, and contrast enhancement.
+# ── PREPROCESS ───────────────────────────────────────────────────────────────
 
-    Args:
-        img_array:        float32 array in [0, 1], shape (H, W, 3).
-        apply_clahe:      Apply CLAHE on LAB L-channel.
-        apply_gaussian:   Apply mild Gaussian blur (noise reduction).
-        enhance_contrast: Pillow contrast factor (1.0 = no change).
-
-    Returns:
-        Processed float32 array in [0, 1].
+def preprocess_image(img_array: np.ndarray,
+                     apply_clahe: bool = True,
+                     apply_gaussian: bool = True,
+                     enhance_contrast: float = 1.2) -> np.ndarray | None:
     """
-    if img_array is None:
-        return None
+    Apply clinical preprocessing to a skin-lesion image.
+
+    Steps (all optional via config):
+      1. CLAHE per LAB channel
+      2. Gaussian blur (mild denoising)
+      3. Contrast enhancement via PIL
+
+    Parameters
+    ----------
+    img_array : float32 np.ndarray (H, W, 3), values 0–255
+    apply_clahe : apply Contrast Limited Adaptive Histogram Equalization
+    apply_gaussian : apply mild Gaussian smoothing
+    enhance_contrast : PIL contrast multiplier (1.0 = no change)
+
+    Returns
+    -------
+    np.ndarray (H, W, 3) float32 or None on failure.
+    """
     try:
-        img_u8 = (img_array * 255).astype(np.uint8)
+        img = img_array.astype(np.uint8)
 
-        if apply_clahe and img_u8.ndim == 3:
-            lab = cv2.cvtColor(img_u8, cv2.COLOR_RGB2LAB)
+        if apply_clahe:
+            lab = cv2.cvtColor(img, cv2.COLOR_RGB2LAB)
             clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
             lab[:, :, 0] = clahe.apply(lab[:, :, 0])
-            img_u8 = cv2.cvtColor(lab, cv2.COLOR_LAB2RGB)
+            img = cv2.cvtColor(lab, cv2.COLOR_LAB2RGB)
 
         if apply_gaussian:
-            img_u8 = cv2.GaussianBlur(img_u8, (3, 3), 0)
+            img = cv2.GaussianBlur(img, (3, 3), 0)
 
         if enhance_contrast != 1.0:
-            pil_img = Image.fromarray(img_u8)
+            pil_img = Image.fromarray(img)
             pil_img = ImageEnhance.Contrast(pil_img).enhance(enhance_contrast)
-            img_u8 = np.array(pil_img)
+            img = np.array(pil_img)
 
-        return img_u8.astype(np.float32) / 255.0
-    except Exception as exc:
-        print(f"[preprocess_image] Error: {exc}")
+        return img.astype(np.float32)
+
+    except Exception as e:
+        print(f"[preprocess_image] ERROR: {e}")
         return None
 
 
-def augment_image(
-    img_array: np.ndarray,
-    rotation_range: int = 15,
-    brightness_range: tuple = (0.8, 1.2),
-    zoom_range: float = 0.1,
-    horizontal_flip: bool = True
-) -> np.ndarray:
-    """
-    Apply random augmentation: rotation, brightness, zoom, flip.
+# ── AUGMENTATION ─────────────────────────────────────────────────────────────
 
-    Args:
-        img_array:        float32 array in [0, 1].
-        rotation_range:   Max rotation in degrees.
-        brightness_range: (min, max) brightness factors.
-        zoom_range:       Max zoom fraction.
-        horizontal_flip:  Whether to randomly flip horizontally.
-
-    Returns:
-        Augmented float32 array in [0, 1].
+def augment_image(img_array: np.ndarray,
+                  rotation_range: int = 15,
+                  brightness_range: tuple = (0.8, 1.2),
+                  zoom_range: float = 0.1,
+                  horizontal_flip: bool = True,
+                  vertical_flip: bool = False) -> np.ndarray:
     """
-    img_u8 = (img_array * 255).astype(np.uint8)
-    h, w = img_u8.shape[:2]
+    Apply random augmentation to a single image.
+
+    Parameters
+    ----------
+    img_array : float32 np.ndarray (H, W, 3)
+
+    Returns
+    -------
+    Augmented np.ndarray (H, W, 3) float32.
+    """
+    img = img_array.astype(np.uint8)
+    h, w = img.shape[:2]
 
     # Random rotation
-    angle = np.random.uniform(-rotation_range, rotation_range)
-    M = cv2.getRotationMatrix2D((w / 2, h / 2), angle, 1.0)
-    img_u8 = cv2.warpAffine(img_u8, M, (w, h), borderMode=cv2.BORDER_REFLECT)
+    if rotation_range > 0:
+        angle = random.uniform(-rotation_range, rotation_range)
+        M = cv2.getRotationMatrix2D((w / 2, h / 2), angle, 1.0)
+        img = cv2.warpAffine(img, M, (w, h),
+                             borderMode=cv2.BORDER_REFLECT_101)
 
-    # Random brightness
-    factor = np.random.uniform(*brightness_range)
-    pil_img = ImageEnhance.Brightness(Image.fromarray(img_u8)).enhance(factor)
-    img_u8 = np.array(pil_img)
-
-    # Random zoom (center crop + resize back)
+    # Random zoom (crop + resize)
     if zoom_range > 0:
-        zf = np.random.uniform(0, zoom_range)
-        crop_h = int(h * (1 - zf))
-        crop_w = int(w * (1 - zf))
-        start_y = (h - crop_h) // 2
-        start_x = (w - crop_w) // 2
-        img_u8 = img_u8[start_y:start_y + crop_h, start_x:start_x + crop_w]
-        img_u8 = cv2.resize(img_u8, (w, h))
+        factor = random.uniform(1.0, 1.0 + zoom_range)
+        new_h, new_w = int(h * factor), int(w * factor)
+        img_resized = cv2.resize(img, (new_w, new_h))
+        start_y = (new_h - h) // 2
+        start_x = (new_w - w) // 2
+        img = img_resized[start_y:start_y + h, start_x:start_x + w]
 
-    # Random horizontal flip
-    if horizontal_flip and np.random.random() > 0.5:
-        img_u8 = cv2.flip(img_u8, 1)
+    # Random flips
+    if horizontal_flip and random.random() > 0.5:
+        img = cv2.flip(img, 1)
+    if vertical_flip and random.random() > 0.5:
+        img = cv2.flip(img, 0)
 
-    return img_u8.astype(np.float32) / 255.0
+    # Brightness
+    if brightness_range:
+        factor = random.uniform(*brightness_range)
+        pil_img = Image.fromarray(img)
+        pil_img = ImageEnhance.Brightness(pil_img).enhance(factor)
+        img = np.array(pil_img)
+
+    return img.astype(np.float32)
 
 
-# ── HDF5 extraction (ISIC 2024 stores images in HDF5) ────────────────────────
+# ── OVERSAMPLING ─────────────────────────────────────────────────────────────
 
-def extract_images_from_hdf5(
-    hdf5_path: str,
-    output_folder: str,
-    max_images: int | None = None
-) -> str:
+def oversample_malignant(X_img: np.ndarray,
+                         X_tab: np.ndarray,
+                         y: np.ndarray,
+                         target_ratio: float = 0.25,
+                         strong_aug: bool = True) -> tuple:
     """
-    Extract JPEG images from ISIC 2024's train-image.hdf5 to a directory.
+    Oversample the Malignant (minority) class using augmentation.
 
-    Args:
-        hdf5_path:     Path to the HDF5 file.
-        output_folder: Directory to write extracted .jpg files.
-        max_images:    Limit extraction (None = all).
+    Parameters
+    ----------
+    X_img        : (N, H, W, 3) image array
+    X_tab        : (N, F) tabular feature array
+    y            : (N,)  binary labels  0 = Benign, 1 = Malignant
+    target_ratio : desired fraction of Malignant samples in the result
+    strong_aug   : apply aggressive augmentation to synthetic samples
 
-    Returns:
-        output_folder path.
+    Returns
+    -------
+    X_img_out, X_tab_out, y_out — shuffled together
     """
-    import h5py
-    from pathlib import Path
+    n_neg = int(np.sum(y == 0))
+    n_pos = int(np.sum(y == 1))
+    n_needed = int(target_ratio * n_neg / (1 - target_ratio)) - n_pos
 
-    Path(output_folder).mkdir(parents=True, exist_ok=True)
-    print(f"Extracting images from: {hdf5_path}")
+    if n_needed <= 0:
+        print("[oversample] No oversampling needed.")
+        return X_img, X_tab, y
 
-    extracted = errors = 0
-    with h5py.File(hdf5_path, "r") as hf:
-        keys = list(hf.keys())
+    print(f"[oversample] Generating {n_needed} synthetic Malignant samples "
+          f"(current ratio: {n_pos / (n_neg + n_pos):.3f} → target: {target_ratio:.2f})")
+
+    pos_idx = np.where(y == 1)[0]
+    aug_imgs, aug_tabs, aug_labels = [], [], []
+
+    for i in range(n_needed):
+        src = pos_idx[i % len(pos_idx)]
+        img = X_img[src].copy()
+
+        if strong_aug:
+            img = augment_image(img,
+                                rotation_range=25,
+                                brightness_range=(0.7, 1.3),
+                                zoom_range=0.15,
+                                horizontal_flip=True,
+                                vertical_flip=True)
+        else:
+            img = augment_image(img)
+
+        aug_imgs.append(img)
+        aug_tabs.append(X_tab[src])
+        aug_labels.append(1)
+
+    X_img_out = np.concatenate([X_img, np.array(aug_imgs, dtype=np.float32)], axis=0)
+    X_tab_out = np.concatenate([X_tab, np.array(aug_tabs, dtype=np.float32)], axis=0)
+    y_out     = np.concatenate([y,     np.array(aug_labels, dtype=np.int32)],  axis=0)
+
+    # Shuffle
+    idx = np.random.permutation(len(y_out))
+    return X_img_out[idx], X_tab_out[idx], y_out[idx]
+
+
+# ── HDF5 EXTRACTION ──────────────────────────────────────────────────────────
+
+def extract_images_from_hdf5(hdf5_path: str,
+                              output_folder: str,
+                              max_images: int | None = None) -> list:
+    """
+    Extract JPEG images stored inside an ISIC HDF5 file to individual files.
+
+    Parameters
+    ----------
+    hdf5_path     : path to train-image.hdf5
+    output_folder : destination directory
+    max_images    : stop after this many images (None = all)
+
+    Returns
+    -------
+    List of extracted file paths.
+    """
+    os.makedirs(output_folder, exist_ok=True)
+    extracted = []
+
+    with h5py.File(hdf5_path, "r") as f:
+        keys = list(f.keys())
         if max_images:
             keys = keys[:max_images]
-        print(f"Total images in HDF5: {len(hf.keys())} | Extracting: {len(keys)}")
 
-        for i, isic_id in enumerate(keys):
+        print(f"[extract_images] Extracting {len(keys)} images → {output_folder}")
+
+        for i, key in enumerate(keys):
             try:
-                img_bytes = hf[isic_id][()]
-                out_path = Path(output_folder) / f"{isic_id}.jpg"
-                out_path.write_bytes(img_bytes)
-                extracted += 1
+                img_data = f[key][()]
+
+                if isinstance(img_data, bytes):
+                    img_array = np.frombuffer(img_data, dtype=np.uint8)
+                    img = cv2.imdecode(img_array, cv2.IMREAD_COLOR)
+                    img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
+                else:
+                    img = img_data
+
+                out_path = os.path.join(output_folder, f"{key}.jpg")
+                Image.fromarray(img.astype(np.uint8)).save(out_path, quality=95)
+                extracted.append(out_path)
+
                 if (i + 1) % 1000 == 0:
                     print(f"  Extracted {i + 1}/{len(keys)}")
-            except Exception as exc:
-                errors += 1
-                if errors <= 5:
-                    print(f"  Error with {isic_id}: {exc}")
 
-    print(f"Done. Extracted: {extracted}, Errors: {errors}")
-    return output_folder
+            except Exception as e:
+                print(f"[extract_images] SKIP {key}: {e}")
+
+    print(f"[extract_images] Done. {len(extracted)} files saved.")
+    return extracted

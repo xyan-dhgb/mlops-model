@@ -1,61 +1,125 @@
 # ============================================================
-# ISIC 2024 Multimodal Training Configuration
+# ISIC 2024 Multimodal Skin Lesion — Training Configuration
+# Model: EfficientNetB3 + Tabular MLP (Binary Classification)
 # ============================================================
 
+# ── DATA ─────────────────────────────────────────────────────
 data:
-  csv_path: "Multimodal/data/raw/train-metadata.csv"
-  hdf5_path: "Multimodal/data/raw/train-image.hdf5"
-  image_dir: "Multimodal/data/raw/images"
-  max_images: 5000          # null = extract all from HDF5
-
-preprocessing:
+  csv_path: "data/raw/train-metadata.csv"
+  hdf5_path: "data/raw/train-image.hdf5"
+  image_dir: "data/raw/images"          # extracted from HDF5
   image_size: [224, 224]
+  max_images: null                       # null = load all
+  random_seed: 42
+
+  # Columns to EXCLUDE from tabular features
+  label_col: "target"
+  id_col: "isic_id"
+  exclude_cols:
+    - "target"
+    - "isic_id"
+    - "patient_id"
+    - "attribution"
+    - "copyright_license"
+    - "image_type"
+    - "iddx_full"
+    - "iddx_1"
+    - "iddx_2"
+    - "iddx_3"
+    - "iddx_4"
+    - "iddx_5"
+    - "mel_mitotic_index"
+    - "mel_thick_mm"
+    - "lesion_id"
+
+  # Categorical columns to label-encode and add to tabular features
+  cat_cols:
+    - "sex"
+    - "anatom_site_general"
+
+# ── PREPROCESSING ─────────────────────────────────────────────
+preprocessing:
+  # Image preprocessing
   apply_clahe: true
   apply_gaussian: true
   enhance_contrast: 1.2
-  augmentation:
-    rotation_range: 15
-    brightness_range: [0.8, 1.2]
-    zoom_range: 0.1
-    horizontal_flip: true
 
-split:
-  test_size: 0.20
-  val_size: 0.20
-  random_state: 42
-  stratify: true
+  # Augmentation
+  rotation_range: 15
+  brightness_range: [0.8, 1.2]
+  zoom_range: 0.1
+  horizontal_flip: true
+  vertical_flip: false
 
+  # Tabular preprocessing
+  imputer_strategy: "median"            # fill missing numeric values
+  scaler: "standard"                    # standard | minmax | none
+
+# ── IMBALANCE HANDLING ────────────────────────────────────────
+imbalance:
+  oversample_ratio: 0.25               # target Malignant ratio after oversampling
+  class_weight_multiplier: 1.2         # applied on top of balanced weights
+  strong_aug_for_minority: true
+
+# ── MODEL ─────────────────────────────────────────────────────
 model:
-  image_shape: [224, 224, 3]
-  num_classes: 2            # Binary: 0=Benign, 1=Malignant
+  backbone: "EfficientNetB3"
+  backbone_weights: "imagenet"
+  efficientnet_last_conv: "top_activation"
 
+  # Tabular MLP branch
+  tabular_hidden: [128, 64, 32]
+
+  # Fusion head
+  fusion_hidden: [256, 128, 64]
+
+  dropout_image: 0.4
+  dropout_tabular: 0.3
+  dropout_fusion: [0.4, 0.3, 0.2]
+
+# ── LOSS ──────────────────────────────────────────────────────
+loss:
+  type: "focal"                         # focal | bce
+  focal_gamma: 2.0
+  focal_alpha: 0.75
+
+# ── TRAINING ─────────────────────────────────────────────────
 training:
-  epochs: 20
-  batch_size: 32
-  learning_rate: 0.0001
-  use_class_weights: true   # Handles class imbalance
-  callbacks:
-    early_stopping:
-      monitor: val_auc
-      patience: 5
-      mode: max
-    reduce_lr:
-      monitor: val_loss
-      factor: 0.5
-      patience: 3
-      min_lr: 0.000001
-    checkpoint:
-      monitor: val_auc
-      mode: max
+  # Phase 1 — backbone FROZEN
+  phase1:
+    epochs: 30
+    batch_size: 32
+    learning_rate: 1.0e-3
+    monitor: "val_auc"
+    patience: 8                         # EarlyStopping patience
+    checkpoint_path: "final/best_model_phase1.h5"
 
-output:
-  checkpoint_path: "Multimodal/final/best_model.h5"
-  preprocessor_path: "Multimodal/final/preprocessor.pkl"
-  mlflow_experiment: "ISIC2024_Multimodal"
-  mlflow_tracking_uri: "http://localhost:5000"
+  # Phase 2 — backbone UNFROZEN from layer 300
+  phase2:
+    epochs: 20
+    batch_size: 16
+    learning_rate: 1.0e-4
+    fine_tune_from: 300
+    monitor: "val_auc"
+    patience: 5
+    checkpoint_path: "final/best_model_isic2024.h5"
 
-xai:
-  enabled: true
-  last_conv_layer: "conv2d_2"   # Last Conv2D layer name in CNN branch
-  shap_background_samples: 100
-  gradcam_samples: 3
+  # Train / Val / Test split
+  val_size: 0.1
+  test_size: 0.2
+
+# ── EVALUATION ────────────────────────────────────────────────
+evaluation:
+  threshold_strategy: "f1"             # f1 | precision | fixed
+  min_recall: 0.60
+  fixed_threshold: 0.5
+  pauc_min_tpr: 0.80
+
+# ── ARTIFACTS ────────────────────────────────────────────────
+artifacts:
+  final_dir: "final"
+  preprocessor_path: "final/preprocessor.pkl"
+  label_encoder_path: "final/label_encoder.pkl"
+  scaler_path: "final/scaler.pkl"
+  cat_encoders_path: "final/cat_encoders.pkl"
+  results_path: "final/evaluation_results.json"

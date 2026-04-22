@@ -1,28 +1,42 @@
-FROM python:3.11-slim
+# ============================================================
+# Dockerfile.preprocessing
+# ============================================================
+# Stage 1 of the multimodal pipeline:
+#   • HDF5 image extraction (label-aware: all Malignant + sampled Benign)
+#   • CLAHE + Gaussian preprocessing
+#   • Tabular feature engineering (IQR clip, LabelEncode, StandardScale)
+#   • Outputs processed arrays to /data/processed/
+# ============================================================
+
+FROM tensorflow/tensorflow:2.15.0
+
+LABEL stage="preprocessing"
+LABEL description="ISIC 2024 – Image extraction + tabular preprocessing"
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    libgl1-mesa-glx \
+    libglib2.0-0 \
+    && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
 
-RUN apt-get update && apt-get install -y --no-install-recommends \
-    libglib2.0-0 libsm6 libxext6 libxrender-dev libgomp1 \
-    libhdf5-dev gcc g++ \
-    && rm -rf /var/lib/apt/lists/*
+COPY requirements-preprocessing.txt requirements.txt
+RUN pip install --no-cache-dir --upgrade pip && \
+    pip install --no-cache-dir -r requirements.txt
 
-COPY Multimodal/requirement.txt ./requirements.txt
-RUN pip install --no-cache-dir -r requirements.txt
+COPY src/data_preprocessing.py src/
 
-COPY . .
+ENV PYTHONPATH="/app/src:${PYTHONPATH}"
+ENV TF_CPP_MIN_LOG_LEVEL=3
 
-ENV PYTHONPATH=/app
+# ── Preprocessing entrypoint ─────────────────────────────────────────────────
+COPY scripts/preprocess.py scripts/
 
-# Entrypoint: extract images from HDF5, then preprocess metadata CSV
-CMD ["python", "-c", "\
-import yaml, pandas as pd, os; \
-from Multimodic.preprocessing.image_preprocessing import extract_images_from_hdf5; \
-from Multimodal.preprocessing.tabular_preprocessing import preprocess_csv_data, save_preprocessor; \
-cfg = yaml.safe_load(open('Multimodal/config/train_config.yaml')); \
-extract_images_from_hdf5(cfg['data']['hdf5_path'], cfg['data']['image_dir'], cfg['data'].get('max_images')); \
-df = pd.read_csv(cfg['data']['csv_path']); \
-df_out, report = preprocess_csv_data(df); \
-df_out.to_csv('Multimodal/data/raw/train-metadata-processed.csv', index=False); \
-print('Preprocessing complete:', report['final_shape']) \
-"]
+# Environment defaults
+ENV CSV_PATH=/data/train-metadata.csv
+ENV HDF5_PATH=/data/train-image.hdf5
+ENV IMAGE_DIR=/data/images
+ENV OUTPUT_DIR=/data/processed
+ENV N_BENIGN=4000
+
+CMD ["python", "scripts/preprocess.py"]

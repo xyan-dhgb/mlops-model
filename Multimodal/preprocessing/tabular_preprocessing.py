@@ -1,182 +1,221 @@
 """
-Tabular Preprocessing for ISIC 2024 metadata (train-metadata.csv).
-Handles: column normalisation, missing values, outlier clipping,
-         categorical encoding, and StandardScaler fitting/saving.
+preprocessing/tabular_preprocessing.py
+=======================================
+Tabular (metadata) preprocessing for ISIC 2024.
+
+Functions
+---------
+clean_dataframe        : Normalise column names, fill missing values, clip outliers
+encode_categoricals    : LabelEncode categorical columns in-place
+build_tabular_features : Select + scale numeric & encoded categorical features
+save_preprocessor      : Persist encoders + scaler to disk
+load_preprocessor      : Restore encoders + scaler from disk
 """
 
+import os
+import pickle
 import numpy as np
 import pandas as pd
-from sklearn.preprocessing import LabelEncoder, StandardScaler
 from sklearn.impute import SimpleImputer
-import pickle
-from pathlib import Path
+from sklearn.preprocessing import StandardScaler, MinMaxScaler, LabelEncoder
 
 
-# ── Constants ─────────────────────────────────────────────────────────────────
+# ── COLUMN CLEANING ──────────────────────────────────────────────────────────
 
-LABEL_COL = "target"
-ID_COL = "isic_id"
-
-EXCLUDE_COLS = [
-    LABEL_COL, ID_COL, "patient_id", "attribution", "copyright_license",
-    "image_type", "iddx_full", "iddx_1", "iddx_2", "iddx_3", "iddx_4",
-    "iddx_5", "mel_mitotic_index", "mel_thick_mm", "lesion_id",
-]
-
-CATEGORICAL_COLS = ["sex", "anatom_site_general"]
-
-
-# ── Full preprocessing pipeline ──────────────────────────────────────────────
-
-def preprocess_csv_data(df: pd.DataFrame) -> tuple[pd.DataFrame, dict]:
+def clean_dataframe(df: pd.DataFrame,
+                    imputer_strategy: str = "median",
+                    clip_outliers: bool = True,
+                    label_col: str = "target") -> tuple[pd.DataFrame, dict]:
     """
-    Clean and normalise ISIC 2024 metadata.
+    Normalise a raw ISIC metadata DataFrame.
 
-    Steps:
-      1. Normalise column names (lowercase, strip, replace special chars).
-      2. Fill missing numerics with median; categoricals with mode.
-      3. Clip numeric outliers (IQR × 1.5).
+    Steps
+    -----
+    1. Strip & lower-case column names
+    2. Fill missing values (numeric → median, categorical → mode)
+    3. Clip numeric outliers via IQR method (preserves minority class column)
 
-    Args:
-        df: Raw DataFrame from train-metadata.csv.
-
-    Returns:
-        (df_processed, report) where report is a summary dict.
+    Returns
+    -------
+    (df_clean, report)  where report is a dict with before/after stats.
     """
     report: dict = {}
-    df_out = df.copy()
+    df = df.copy()
 
-    # ── 1. Column names ───────────────────────────────────────────────────
-    old_cols = df_out.columns.tolist()
-    df_out.columns = (
-        df_out.columns
-        .str.strip()
-        .str.lower()
-        .str.replace(r"[^a-z0-9_]", "_", regex=True)
-        .str.replace(r"_+", "_", regex=True)
-        .str.strip("_")
-    )
-    report["column_mapping"] = dict(zip(old_cols, df_out.columns.tolist()))
-    report["initial_shape"] = df_out.shape
+    # 1. Normalise column names
+    df.columns = (df.columns
+                    .str.strip()
+                    .str.lower()
+                    .str.replace(r"\s+", "_", regex=True)
+                    .str.replace(r"[^a-z0-9_]", "_", regex=True)
+                    .str.replace(r"_+", "_", regex=True)
+                    .str.strip("_"))
 
-    # ── 2. Missing values ─────────────────────────────────────────────────
-    report["missing_before"] = int(df_out.isnull().sum().sum())
+    report["initial_shape"] = df.shape
 
-    num_cols = df_out.select_dtypes(include="number").columns.tolist()
-    cat_cols = df_out.select_dtypes(include="object").columns.tolist()
+    # 2. Fill missing values
+    missing_before = int(df.isnull().sum().sum())
+    report["missing_before"] = missing_before
 
-    if num_cols:
-        imputer_num = SimpleImputer(strategy="median")
-        df_out[num_cols] = imputer_num.fit_transform(df_out[num_cols])
+    numeric_cols = df.select_dtypes(include=["float64", "int64"]).columns.tolist()
+    cat_cols_all = df.select_dtypes(include=["object"]).columns.tolist()
 
-    for col in cat_cols:
-        if df_out[col].isnull().any():
-            df_out[col] = df_out[col].fillna(df_out[col].mode()[0])
+    if numeric_cols:
+        imputer = SimpleImputer(strategy=imputer_strategy)
+        df[numeric_cols] = imputer.fit_transform(df[numeric_cols])
 
-    report["missing_after"] = int(df_out.isnull().sum().sum())
+    for col in cat_cols_all:
+        mode_val = df[col].mode()
+        fill = mode_val.iloc[0] if len(mode_val) > 0 else "unknown"
+        df[col].fillna(fill, inplace=True)
 
-    # ── 3. Outlier clipping (IQR) ─────────────────────────────────────────
+    report["missing_after"] = int(df.isnull().sum().sum())
+
+    # 3. Clip numeric outliers (IQR)
     outlier_report: dict = {}
-    feature_cols = [c for c in num_cols if c not in EXCLUDE_COLS]
-
-    for col in feature_cols:
-        q1, q3 = df_out[col].quantile([0.25, 0.75])
-        iqr = q3 - q1
-        lo, hi = q1 - 1.5 * iqr, q3 + 1.5 * iqr
-        n_outliers = int(((df_out[col] < lo) | (df_out[col] > hi)).sum())
-        if n_outliers:
-            outlier_report[col] = {
-                "count": n_outliers,
-                "percent": round(n_outliers / len(df_out) * 100, 2),
-            }
-            df_out[col] = df_out[col].clip(lo, hi)
+    if clip_outliers:
+        safe_numeric = [c for c in numeric_cols if c != label_col]
+        for col in safe_numeric[:50]:   # limit to first 50 for speed
+            Q1, Q3 = df[col].quantile([0.25, 0.75])
+            IQR = Q3 - Q1
+            lo, hi = Q1 - 1.5 * IQR, Q3 + 1.5 * IQR
+            n_outliers = int(((df[col] < lo) | (df[col] > hi)).sum())
+            if n_outliers > 0:
+                outlier_report[col] = {
+                    "count": n_outliers,
+                    "pct": round(n_outliers / len(df) * 100, 2),
+                }
+                df[col] = df[col].clip(lo, hi)
 
     report["outliers"] = outlier_report
-    report["final_shape"] = df_out.shape
+    report["final_shape"] = df.shape
 
-    print(f"[preprocess_csv_data] {report['initial_shape']} → {report['final_shape']}, "
-          f"missing {report['missing_before']} → {report['missing_after']}")
-    return df_out, report
-
-
-# ── Feature extraction / encoding ────────────────────────────────────────────
-
-def get_tabular_columns(df: pd.DataFrame) -> list[str]:
-    """Return numeric feature columns (excludes metadata IDs / target)."""
-    num_cols = df.select_dtypes(include="number").columns.tolist()
-    return [c for c in num_cols if c not in EXCLUDE_COLS]
+    print(f"[clean_dataframe] {report['initial_shape']} → {report['final_shape']}  "
+          f"| missing: {missing_before} → {report['missing_after']}  "
+          f"| outlier cols clipped: {len(outlier_report)}")
+    return df, report
 
 
-def fit_encoders(df: pd.DataFrame, cat_cols: list[str] | None = None) -> dict:
+# ── CATEGORICAL ENCODING ─────────────────────────────────────────────────────
+
+def encode_categoricals(df: pd.DataFrame,
+                         cat_cols: list[str],
+                         encoders: dict | None = None) -> tuple[pd.DataFrame, dict]:
     """
-    Fit a LabelEncoder per categorical column.
+    Label-encode categorical columns.
 
-    Args:
-        df:       DataFrame containing the columns.
-        cat_cols: Column names to encode (defaults to CATEGORICAL_COLS).
+    Parameters
+    ----------
+    df        : DataFrame (already cleaned)
+    cat_cols  : e.g. ['sex', 'anatom_site_general']
+    encoders  : pass existing encoders to transform (instead of fit+transform)
 
-    Returns:
-        Dict mapping column name → fitted LabelEncoder.
+    Returns
+    -------
+    (df_encoded, encoders_dict)
     """
-    if cat_cols is None:
-        cat_cols = CATEGORICAL_COLS
+    df = df.copy()
+    fit_new = encoders is None
+    encoders = encoders or {}
 
-    encoders: dict = {}
     for col in cat_cols:
-        if col in df.columns:
+        if col not in df.columns:
+            continue
+        df[col] = df[col].astype(str)
+        if fit_new:
             le = LabelEncoder()
-            le.fit(df[col].astype(str))
+            df[col] = le.fit_transform(df[col])
             encoders[col] = le
-    return encoders
-
-
-def encode_categorical(df: pd.DataFrame, encoders: dict) -> pd.DataFrame:
-    """Apply fitted LabelEncoders to categorical columns in place."""
-    df_out = df.copy()
-    for col, le in encoders.items():
-        if col in df_out.columns:
+        else:
+            le = encoders[col]
+            # Handle unseen labels gracefully
             known = set(le.classes_)
-            df_out[col] = df_out[col].astype(str).map(
-                lambda v: v if v in known else le.classes_[0]
-            )
-            df_out[col] = le.transform(df_out[col])
-    return df_out
+            df[col] = df[col].apply(lambda v: v if v in known else le.classes_[0])
+            df[col] = le.transform(df[col])
+
+    return df, encoders
 
 
-def scale_features(
-    X: np.ndarray,
-    scaler: StandardScaler | None = None,
-    fit: bool = True
-) -> tuple[np.ndarray, StandardScaler]:
+# ── FEATURE MATRIX BUILDER ───────────────────────────────────────────────────
+
+def build_tabular_features(df: pd.DataFrame,
+                            exclude_cols: list[str],
+                            cat_cols: list[str],
+                            scaler: StandardScaler | MinMaxScaler | None = None,
+                            fit_scaler: bool = True) -> tuple[np.ndarray, list, object]:
     """
-    StandardScale feature matrix.
+    Build the numeric feature matrix from a (cleaned + encoded) DataFrame.
 
-    Args:
-        X:       Feature matrix, shape (N, F).
-        scaler:  Existing scaler to re-use (None → create new).
-        fit:     If True, fit scaler on X; otherwise only transform.
+    Parameters
+    ----------
+    df           : cleaned & encoded DataFrame
+    exclude_cols : columns to drop (label, id, etc.)
+    cat_cols     : categorical cols already encoded — include in features
+    scaler       : pass a fitted scaler to transform (None to create new)
+    fit_scaler   : fit the scaler on this data (False = transform only)
 
-    Returns:
-        (X_scaled, scaler)
+    Returns
+    -------
+    (X_tabular np.ndarray, feature_names list, fitted_scaler)
     """
+    numeric_cols = df.select_dtypes(include=np.number).columns.tolist()
+    feature_cols = [c for c in numeric_cols if c not in exclude_cols]
+
+    # Add encoded categorical columns if not already present
+    for col in cat_cols:
+        if col in df.columns and col not in feature_cols:
+            feature_cols.append(col)
+
+    X = df[feature_cols].values.astype(np.float32)
+
     if scaler is None:
         scaler = StandardScaler()
-    if fit:
-        X_scaled = scaler.fit_transform(X)
+
+    if fit_scaler:
+        X = scaler.fit_transform(X)
     else:
-        X_scaled = scaler.transform(X)
-    return X_scaled.astype(np.float32), scaler
+        X = scaler.transform(X)
+
+    print(f"[build_tabular_features] Feature matrix: {X.shape}  "
+          f"({len(feature_cols)} features)")
+    return X.astype(np.float32), feature_cols, scaler
 
 
-# ── Persistence ───────────────────────────────────────────────────────────────
+# ── PERSISTENCE ──────────────────────────────────────────────────────────────
 
-def save_preprocessor(obj, path: str) -> None:
-    Path(path).parent.mkdir(parents=True, exist_ok=True)
-    with open(path, "wb") as f:
-        pickle.dump(obj, f)
-    print(f"Saved preprocessor → {path}")
+def save_preprocessor(artifacts_dir: str,
+                       encoders: dict,
+                       scaler,
+                       label_encoder: LabelEncoder,
+                       feature_names: list) -> None:
+    """Save all preprocessing artifacts to disk."""
+    os.makedirs(artifacts_dir, exist_ok=True)
+
+    with open(os.path.join(artifacts_dir, "cat_encoders.pkl"),   "wb") as f:
+        pickle.dump(encoders, f)
+    with open(os.path.join(artifacts_dir, "scaler.pkl"),          "wb") as f:
+        pickle.dump(scaler, f)
+    with open(os.path.join(artifacts_dir, "label_encoder.pkl"),   "wb") as f:
+        pickle.dump(label_encoder, f)
+    with open(os.path.join(artifacts_dir, "feature_names.pkl"),   "wb") as f:
+        pickle.dump(feature_names, f)
+
+    print(f"[save_preprocessor] Artifacts saved to '{artifacts_dir}'")
 
 
-def load_preprocessor(path: str):
-    with open(path, "rb") as f:
-        return pickle.load(f)
+def load_preprocessor(artifacts_dir: str) -> dict:
+    """
+    Load preprocessing artifacts from disk.
+
+    Returns dict with keys: encoders, scaler, label_encoder, feature_names.
+    """
+    def _load(name):
+        with open(os.path.join(artifacts_dir, name), "rb") as f:
+            return pickle.load(f)
+
+    return {
+        "encoders":      _load("cat_encoders.pkl"),
+        "scaler":        _load("scaler.pkl"),
+        "label_encoder": _load("label_encoder.pkl"),
+        "feature_names": _load("feature_names.pkl"),
+    }
