@@ -1,40 +1,34 @@
 # ============================================================
-# Dockerfile  –  ISIC 2024 Multimodal Base Image
+# STEP 1 — Prepare Data
+# Downloads ISIC 2024 image HDF5 + CSV metadata
 # ============================================================
-# Base image for GPU-accelerated training (EfficientNetB3 + TF 2.x)
-# Used as parent by Dockerfile.training, .preprocessing, .serving
-# ============================================================
+FROM python:3.10-slim
 
-FROM tensorflow/tensorflow:2.15.0-gpu
+LABEL stage="01_prepare_data" \
+      description="Download ISIC 2024 dataset (HDF5 images + CSV metadata)"
 
-LABEL maintainer="isic2024-mlops"
-LABEL description="ISIC 2024 Multimodal Skin Lesion Classifier – Base"
-
-# ── System deps ───────────────────────────────────────────────────────────────
+# System deps for gdown + hdf5 inspection
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    libgl1-mesa-glx \
-    libglib2.0-0 \
-    libsm6 \
-    libxext6 \
-    libxrender-dev \
-    wget \
-    curl \
-    git \
+        curl \
+        unzip \
+        libhdf5-dev \
     && rm -rf /var/lib/apt/lists/*
 
-# ── Python packages (shared across all stages) ───────────────────────────────
+# Python deps (minimal — only what is needed to download & verify)
+RUN pip install --no-cache-dir \
+        gdown==5.2.0 \
+        h5py==3.11.0 \
+        pandas==2.2.2
+
 WORKDIR /app
 
-COPY requirements.txt .
-RUN pip install --no-cache-dir --upgrade pip && \
-    pip install --no-cache-dir -r requirements.txt
+# Download + unzip script
+COPY download_dataset.py .
 
-# ── Source code ───────────────────────────────────────────────────────────────
-COPY src/  src/
-COPY MLflow_signature/ MLflow_signature/
-COPY scripts/ scripts/
+# Output goes to /data (mount a volume here in production)
+RUN mkdir -p /data/raw
 
-ENV PYTHONPATH="/app/src:${PYTHONPATH}"
-ENV TF_CPP_MIN_LOG_LEVEL=2
+ENV GDRIVE_FILE_ID="1Mrr8m5CP-nj9A-d-6AeXlLKjaYY3pAFb"
+ENV DATA_DIR="/data/raw"
 
-CMD ["python", "scripts/run_train.py"]
+CMD ["python", "download_dataset.py"]

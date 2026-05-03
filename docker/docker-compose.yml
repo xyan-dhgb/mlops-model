@@ -1,0 +1,134 @@
+# docker-compose.yml
+# Orchestrates all 7 pipeline steps with shared volumes.
+# Run: docker compose up --build
+# Each service depends on the previous (sequential pipeline).
+
+version: "3.9"
+
+volumes:
+  data_raw:
+  data_processed:
+  data_splits:
+  data_model:
+  data_output:
+  data_eval:
+  data_xai:
+
+x-common-gpu: &gpu
+  deploy:
+    resources:
+      reservations:
+        devices:
+          - driver: nvidia
+            count: 1
+            capabilities: [gpu]
+
+services:
+
+  # ── Step 1: Download dataset ─────────────────────────────
+  prepare_data:
+    build: ./01_prepare_data
+    volumes:
+      - data_raw:/data/raw
+    environment:
+      - GDRIVE_FILE_ID=1Mrr8m5CP-nj9A-d-6AeXlLKjaYY3pAFb
+      - DATA_DIR=/data/raw
+
+  # ── Step 2: Preprocess images + tabular ──────────────────
+  preprocess:
+    build: ./02_preprocess
+    depends_on: [prepare_data]
+    volumes:
+      - data_raw:/data/raw:ro
+      - data_processed:/data/processed
+    environment:
+      - RAW_DIR=/data/raw
+      - PROCESSED_DIR=/data/processed
+      - IMAGE_SIZE=224
+      # - MAX_IMAGES=5000   # uncomment to limit for testing
+
+  # ── Step 3: Stratified split ─────────────────────────────
+  dataloader:
+    build: ./03_dataloader
+    depends_on: [preprocess]
+    volumes:
+      - data_processed:/data/processed:ro
+      - data_splits:/data/splits
+    environment:
+      - PROCESSED_DIR=/data/processed
+      - SPLIT_DIR=/data/splits
+      - TRAIN_RATIO=0.64
+      - VAL_RATIO=0.16
+      - RANDOM_SEED=42
+
+  # ── Step 4: Build model ───────────────────────────────────
+  build_model:
+    build: ./04_build_model
+    depends_on: [dataloader]
+    <<: *gpu
+    volumes:
+      - data_processed:/data/processed:ro
+      - data_model:/data/model
+    environment:
+      - PROCESSED_DIR=/data/processed
+      - MODEL_DIR=/data/model
+      - IMAGE_SIZE=224
+
+  # ── Step 5: Two-phase training ────────────────────────────
+  train:
+    build: ./05_train
+    depends_on: [build_model]
+    <<: *gpu
+    volumes:
+      - data_processed:/data/processed:ro
+      - data_splits:/data/splits:ro
+      - data_model:/data/model:ro
+      - data_output:/data/output
+    environment:
+      - PROCESSED_DIR=/data/processed
+      - SPLIT_DIR=/data/splits
+      - MODEL_DIR=/data/model
+      - OUTPUT_DIR=/data/output
+      - PHASE1_EPOCHS=20
+      - PHASE2_EPOCHS=10
+      - BATCH_SIZE=32
+      - OVERSAMPLE_RATIO=0.25
+      - CLASS_WEIGHT_MAL=1.2
+      - FINE_TUNE_FROM_LAYER=300
+      - PHASE1_LR=1e-3
+      - PHASE2_LR=1e-4
+
+  # ── Step 6: Evaluate + threshold tuning ──────────────────
+  evaluate:
+    build: ./06_evaluate
+    depends_on: [train]
+    <<: *gpu
+    volumes:
+      - data_processed:/data/processed:ro
+      - data_splits:/data/splits:ro
+      - data_output:/data/output:ro
+      - data_eval:/data/eval
+    environment:
+      - PROCESSED_DIR=/data/processed
+      - SPLIT_DIR=/data/splits
+      - OUTPUT_DIR=/data/output
+      - EVAL_DIR=/data/eval
+      - MIN_TPR=0.80
+
+  # ── Step 7: XAI — Grad-CAM + SHAP ────────────────────────
+  xai:
+    build: ./07_xai
+    depends_on: [evaluate]
+    <<: *gpu
+    volumes:
+      - data_processed:/data/processed:ro
+      - data_splits:/data/splits:ro
+      - data_output:/data/output:ro
+      - data_xai:/data/xai
+    environment:
+      - PROCESSED_DIR=/data/processed
+      - SPLIT_DIR=/data/splits
+      - OUTPUT_DIR=/data/output
+      - XAI_DIR=/data/xai
+      - N_SHAP_SAMPLES=100
+      - LAST_CONV_LAYER=top_conv
