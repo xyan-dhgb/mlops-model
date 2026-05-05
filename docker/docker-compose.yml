@@ -1,8 +1,3 @@
-# docker-compose.yml
-# Orchestrates all 7 pipeline steps with shared volumes.
-# Run: docker compose up --build
-# Each service depends on the previous (sequential pipeline).
-
 version: "3.9"
 
 volumes:
@@ -14,30 +9,20 @@ volumes:
   data_eval:
   data_xai:
 
-x-common-gpu: &gpu
-  deploy:
-    resources:
-      reservations:
-        devices:
-          - driver: nvidia
-            count: 1
-            capabilities: [gpu]
-
 services:
 
-  # ── Step 1: Download dataset ─────────────────────────────
+  # ─── BƯỚC 1: Tải dataset ────────────────────────────────────────────
   prepare_data:
     build: ./01_prepare_data
     volumes:
       - data_raw:/data/raw
     environment:
-      - GDRIVE_FILE_ID=1Mrr8m5CP-nj9A-d-6AeXlLKjaYY3pAFb
+      - GDRIVE_FILE_ID=${GDRIVE_FILE_ID}
       - DATA_DIR=/data/raw
 
-  # ── Step 2: Preprocess images + tabular ──────────────────
-  preprocess:
-    build: ./02_preprocess
-    depends_on: [prepare_data]
+  # ─── BƯỚC 2a: Tiền xử lý ảnh ───────────────────────────────────────
+  preprocess_image:
+    build: ./02_preprocess/image
     volumes:
       - data_raw:/data/raw:ro
       - data_processed:/data/processed
@@ -45,27 +30,39 @@ services:
       - RAW_DIR=/data/raw
       - PROCESSED_DIR=/data/processed
       - IMAGE_SIZE=224
-      # - MAX_IMAGES=5000   # uncomment to limit for testing
+      # - MAX_IMAGES=1000   # Bỏ comment khi test nhanh
+    depends_on:
+      - prepare_data
 
-  # ── Step 3: Stratified split ─────────────────────────────
+  # ─── BƯỚC 2b: Tiền xử lý CSV ───────────────────────────────────────
+  preprocess_csv:
+    build: ./02_preprocess/csv
+    volumes:
+      - data_raw:/data/raw:ro
+      - data_processed:/data/processed
+    environment:
+      - RAW_DIR=/data/raw
+      - PROCESSED_DIR=/data/processed
+    depends_on:
+      - prepare_data
+
+  # ─── BƯỚC 3: Phân chia dữ liệu ──────────────────────────────────────
   dataloader:
     build: ./03_dataloader
-    depends_on: [preprocess]
     volumes:
       - data_processed:/data/processed:ro
       - data_splits:/data/splits
     environment:
       - PROCESSED_DIR=/data/processed
-      - SPLIT_DIR=/data/splits
-      - TRAIN_RATIO=0.64
-      - VAL_RATIO=0.16
+      - SPLITS_DIR=/data/splits
       - RANDOM_SEED=42
+    depends_on:
+      - preprocess_image
+      - preprocess_csv
 
-  # ── Step 4: Build model ───────────────────────────────────
-  build_model:
-    build: ./04_build_model
-    depends_on: [dataloader]
-    <<: *gpu
+  # ─── BƯỚC 4a: Xây dựng EfficientNetB3 branch ────────────────────────
+  build_efficientnetB3:
+    build: ./04_build_model/efficientnetB3
     volumes:
       - data_processed:/data/processed:ro
       - data_model:/data/model
@@ -73,20 +70,39 @@ services:
       - PROCESSED_DIR=/data/processed
       - MODEL_DIR=/data/model
       - IMAGE_SIZE=224
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+    depends_on:
+      - dataloader
 
-  # ── Step 5: Two-phase training ────────────────────────────
+  # ─── BƯỚC 4b: Xây dựng MLP branch ───────────────────────────────────
+  build_mlp:
+    build: ./04_build_model/mlp
+    volumes:
+      - data_processed:/data/processed:ro
+      - data_model:/data/model
+    environment:
+      - PROCESSED_DIR=/data/processed
+      - MODEL_DIR=/data/model
+    depends_on:
+      - dataloader
+
+  # ─── BƯỚC 5: Huấn luyện ─────────────────────────────────────────────
   train:
     build: ./05_train
-    depends_on: [build_model]
-    <<: *gpu
     volumes:
       - data_processed:/data/processed:ro
       - data_splits:/data/splits:ro
-      - data_model:/data/model:ro
+      - data_model:/data/model
       - data_output:/data/output
     environment:
       - PROCESSED_DIR=/data/processed
-      - SPLIT_DIR=/data/splits
+      - SPLITS_DIR=/data/splits
       - MODEL_DIR=/data/model
       - OUTPUT_DIR=/data/output
       - PHASE1_EPOCHS=20
@@ -95,14 +111,22 @@ services:
       - OVERSAMPLE_RATIO=0.25
       - CLASS_WEIGHT_MAL=1.2
       - FINE_TUNE_FROM_LAYER=300
-      - PHASE1_LR=1e-3
-      - PHASE2_LR=1e-4
+      - PHASE1_LR=0.001
+      - PHASE2_LR=0.0001
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+    depends_on:
+      - build_efficientnetB3
+      - build_mlp
 
-  # ── Step 6: Evaluate + threshold tuning ──────────────────
+  # ─── BƯỚC 6: Đánh giá ───────────────────────────────────────────────
   evaluate:
     build: ./06_evaluate
-    depends_on: [train]
-    <<: *gpu
     volumes:
       - data_processed:/data/processed:ro
       - data_splits:/data/splits:ro
@@ -110,25 +134,58 @@ services:
       - data_eval:/data/eval
     environment:
       - PROCESSED_DIR=/data/processed
-      - SPLIT_DIR=/data/splits
+      - SPLITS_DIR=/data/splits
       - OUTPUT_DIR=/data/output
       - EVAL_DIR=/data/eval
-      - MIN_TPR=0.80
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+    depends_on:
+      - train
 
-  # ── Step 7: XAI — Grad-CAM + SHAP ────────────────────────
+  # ─── BƯỚC 7: XAI ────────────────────────────────────────────────────
   xai:
     build: ./07_xai
-    depends_on: [evaluate]
-    <<: *gpu
     volumes:
       - data_processed:/data/processed:ro
       - data_splits:/data/splits:ro
       - data_output:/data/output:ro
+      - data_eval:/data/eval:ro
       - data_xai:/data/xai
     environment:
       - PROCESSED_DIR=/data/processed
-      - SPLIT_DIR=/data/splits
+      - SPLITS_DIR=/data/splits
       - OUTPUT_DIR=/data/output
+      - EVAL_DIR=/data/eval
       - XAI_DIR=/data/xai
-      - N_SHAP_SAMPLES=100
-      - LAST_CONV_LAYER=top_conv
+      - NUM_GRADCAM_SAMPLES=20
+      - NUM_SHAP_SAMPLES=100
+      - SHAP_BACKGROUND=50
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+    depends_on:
+      - evaluate
+
+  # ─── DRIFT MONITOR (chạy liên tục) ──────────────────────────────────
+  drift_monitor:
+    build: ./drift_monitor
+    volumes:
+      - data_eval:/data/eval:ro
+      - data_xai:/data/xai
+    environment:
+      - EVAL_DIR=/data/eval
+      - PRODUCTION_LOG_DIR=/data/production_logs
+      - DRIFT_REPORT_DIR=/data/xai/drift_reports
+      - CHECK_INTERVAL_HOURS=24
+      - PSI_THRESHOLD=0.25
+      - KS_P_THRESHOLD=0.05
+    restart: unless-stopped
