@@ -32,8 +32,8 @@ import pandas as pd
 DATA_DIR = os.environ.get("DATA_DIR", "/data/raw")
 
 # AWS credentials — ưu tiên biến môi trường
-AWS_ACCESS_KEY_ID     = os.environ.get("AKIATTX4CRCOWN6O67VG", "")
-AWS_SECRET_ACCESS_KEY = os.environ.get("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", "")
+AWS_ACCESS_KEY_ID     = os.environ.get("AWS_ACCESS_KEY_ID", "")
+AWS_SECRET_ACCESS_KEY = os.environ.get("AWS_SECRET_ACCESS_KEY", "")
 AWS_SESSION_TOKEN     = os.environ.get("AWS_SESSION_TOKEN", None)
 AWS_REGION            = os.environ.get("AWS_REGION", "ap-southeast-1")
 
@@ -66,9 +66,9 @@ os.makedirs(IMAGE_DIR, exist_ok=True)
 s3 = boto3.client(
     "s3",
     region_name='ap-southeast-1',
-    aws_access_key_id='AKIATTX4CRCOWN6O67VG',
-    aws_secret_access_key='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',
-    aws_session_token=None,
+    aws_access_key_id=AWS_ACCESS_KEY_ID,
+    aws_secret_access_key=AWS_SECRET_ACCESS_KEY,
+    aws_session_token=AWS_SESSION_TOKEN,
 )
 
 
@@ -83,7 +83,7 @@ def _download_if_missing(s3_key: str, local_path: str, label: str) -> None:
     print(f"  Đang tải {label} từ s3://{S3_INPUT_BUCKET}/{s3_key} ...")
     s3.download_file(S3_INPUT_BUCKET, s3_key, local_path)
     size_mb = os.path.getsize(local_path) / 1_048_576
-    print(f"   Đã lưu {label} ({size_mb:.1f} MB) → {local_path}")
+    print(f"  ✓ Đã lưu {label} ({size_mb:.1f} MB) → {local_path}")
 
 
 print("\n[1/4] Tải dataset từ S3 ...")
@@ -186,7 +186,7 @@ def preprocess_metadata(df: pd.DataFrame) -> pd.DataFrame:
 
 df_clean = preprocess_metadata(df_raw)
 df_clean.to_csv(LOCAL_CLEAN_CSV, index=False)
-print(f"   Đã lưu metadata sạch → {LOCAL_CLEAN_CSV}")
+print(f"  ✓ Đã lưu metadata sạch → {LOCAL_CLEAN_CSV}")
 
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -232,8 +232,8 @@ if to_extract:
             except Exception as exc:
                 errors += 1
                 if errors <= 5:
-                    print(f"    Lỗi {isic_id}: {exc}")
-    print(f"   Hoàn thành: {extracted:,} ảnh mới | Lỗi: {errors}")
+                    print(f"    ⚠ Lỗi {isic_id}: {exc}")
+    print(f"  ✓ Hoàn thành: {extracted:,} ảnh mới | Lỗi: {errors}")
 else:
     print("  [skip] Tất cả ảnh đã tồn tại.")
 
