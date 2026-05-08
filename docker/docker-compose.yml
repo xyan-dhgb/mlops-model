@@ -13,16 +13,25 @@ services:
 
   # ─── BƯỚC 1: Tải dataset ────────────────────────────────────────────
   prepare_data:
-    build: ./01_prepare_data
+    build:
+      context: ..
+      dockerfile: Docker/01_prepare_data/Dockerfile
     volumes:
       - data_raw:/data/raw
     environment:
-      - GDRIVE_FILE_ID=${GDRIVE_FILE_ID}
-      - DATA_DIR=/data/raw
+        - AWS_ACCESS_KEY_ID=${AWS_ACCESS_KEY_ID}
+        - AWS_SECRET_ACCESS_KEY=${AWS_SECRET_ACCESS_KEY}
+        - AWS_SESSION_TOKEN=${AWS_SESSION_TOKEN:-}
+        - AWS_REGION=${AWS_REGION:-ap-southeast-1}
+        - S3_INPUT_BUCKET=${S3_INPUT_BUCKET:-kltn-isic-2024-challenge}
+        - S3_INPUT_PREFIX=${S3_INPUT_PREFIX:-isic-2024-challenge}
+        - DATA_DIR=/data/raw
 
   # ─── BƯỚC 2a: Tiền xử lý ảnh ───────────────────────────────────────
   preprocess_image:
-    build: ./02_preprocess/image
+    build:
+      context: ..
+      dockerfile: Docker/02_preprocess/image/Dockerfile
     volumes:
       - data_raw:/data/raw:ro
       - data_processed:/data/processed
@@ -36,7 +45,9 @@ services:
 
   # ─── BƯỚC 2b: Tiền xử lý CSV ───────────────────────────────────────
   preprocess_csv:
-    build: ./02_preprocess/csv
+    build:
+      context: ..
+      dockerfile: Docker/02_preprocess/csv/Dockerfile
     volumes:
       - data_raw:/data/raw:ro
       - data_processed:/data/processed
@@ -48,7 +59,9 @@ services:
 
   # ─── BƯỚC 3: Phân chia dữ liệu ──────────────────────────────────────
   dataloader:
-    build: ./03_dataloader
+    build:
+      context: ..
+      dockerfile: Docker/03_dataloader/Dockerfile
     volumes:
       - data_processed:/data/processed:ro
       - data_splits:/data/splits
@@ -62,7 +75,9 @@ services:
 
   # ─── BƯỚC 4a: Xây dựng EfficientNetB3 branch ────────────────────────
   build_efficientnetB3:
-    build: ./04_build_model/efficientnetB3
+    build:
+      context: ..
+      dockerfile: Docker/04_build_model/efficientnetB3/Dockerfile
     volumes:
       - data_processed:/data/processed:ro
       - data_model:/data/model
@@ -82,7 +97,9 @@ services:
 
   # ─── BƯỚC 4b: Xây dựng MLP branch ───────────────────────────────────
   build_mlp:
-    build: ./04_build_model/mlp
+    build:
+      context: ..
+      dockerfile: Docker/04_build_model/mlp/Dockerfile
     volumes:
       - data_processed:/data/processed:ro
       - data_model:/data/model
@@ -94,7 +111,9 @@ services:
 
   # ─── BƯỚC 5: Huấn luyện ─────────────────────────────────────────────
   train:
-    build: ./05_train
+    build:
+      context: ..
+      dockerfile: Docker/05_train/Dockerfile
     volumes:
       - data_processed:/data/processed:ro
       - data_splits:/data/splits:ro
@@ -126,7 +145,9 @@ services:
 
   # ─── BƯỚC 6: Đánh giá ───────────────────────────────────────────────
   evaluate:
-    build: ./06_evaluate
+    build:
+      context: ..
+      dockerfile: Docker/06_evaluate/Dockerfile
     volumes:
       - data_processed:/data/processed:ro
       - data_splits:/data/splits:ro
@@ -149,7 +170,9 @@ services:
 
   # ─── BƯỚC 7: XAI ────────────────────────────────────────────────────
   xai:
-    build: ./07_xai
+    build:
+      context: ..
+      dockerfile: Docker/07_xai/Dockerfile
     volumes:
       - data_processed:/data/processed:ro
       - data_splits:/data/splits:ro
@@ -177,7 +200,9 @@ services:
 
   # ─── DRIFT MONITOR (chạy liên tục) ──────────────────────────────────
   drift_monitor:
-    build: ./drift_monitor
+    build:
+      context: ..
+      dockerfile: Docker/drift_monitor/Dockerfile
     volumes:
       - data_eval:/data/eval:ro
       - data_xai:/data/xai

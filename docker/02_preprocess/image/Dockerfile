@@ -15,7 +15,7 @@ RUN pip install --no-cache-dir \
     Pillow==10.3.0 \
     tqdm==4.66.4
 
-COPY preprocess_image.py .
+COPY Multimodal/preprocessing/preprocess_image.py .
 
 ENV RAW_DIR=/data/raw
 ENV PROCESSED_DIR=/data/processed

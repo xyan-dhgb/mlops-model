@@ -7,7 +7,7 @@ RUN pip install --no-cache-dir \
     pandas==2.2.2 \
     tensorflow-cpu==2.16.1
 
-COPY build_mlp.py .
+COPY Multimodal/models/build_mlp.py .
 
 ENV PROCESSED_DIR=/data/processed
 ENV MODEL_DIR=/data/model
