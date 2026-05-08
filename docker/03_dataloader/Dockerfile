@@ -7,7 +7,7 @@ RUN pip install --no-cache-dir \
     pandas==2.2.2 \
     scikit-learn==1.5.0
 
-COPY dataloader.py .
+COPY Multimodal/data_loader/dataloader.py .
 
 ENV PROCESSED_DIR=/data/processed
 ENV SPLITS_DIR=/data/splits

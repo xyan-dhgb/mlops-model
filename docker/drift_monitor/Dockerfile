@@ -9,7 +9,7 @@ RUN pip install --no-cache-dir \
     evidently==0.4.30 \
     schedule==1.2.1
 
-COPY drift_monitor.py .
+COPY Multimodal/drift_monitor/drift_monitor.py .
 
 ENV EVAL_DIR=/data/eval
 ENV PRODUCTION_LOG_DIR=/data/production_logs

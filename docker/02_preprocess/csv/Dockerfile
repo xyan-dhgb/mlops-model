@@ -7,7 +7,7 @@ RUN pip install --no-cache-dir \
     pandas==2.2.2 \
     scikit-learn==1.5.0
 
-COPY preprocess_csv.py .
+COPY Multimodal/preprocessing/preprocess_csv.py .
 
 ENV RAW_DIR=/data/raw
 ENV PROCESSED_DIR=/data/processed
