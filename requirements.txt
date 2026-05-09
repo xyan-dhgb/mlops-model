@@ -1,6 +1,6 @@
 # requirements.txt – shared base
-tensorflow==2.15.0
-keras==2.15.0
+tensorflow==2.16.1
+keras==3.3.3
 numpy>=1.24,<2.0
 pandas>=2.0
 scikit-learn>=1.3
