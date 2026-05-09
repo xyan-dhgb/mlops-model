@@ -12,8 +12,8 @@ Phase 2: Unfreeze ≥ 300   | LR=1e-4 | 10 epochs | EarlyStopping(val_auc, patie
   /data/model/mlp_meta.json
 
 Đầu ra:
-  /data/output/best_model_phase1.h5
-  /data/output/best_model_isic2024.h5
+  /data/output/best_model_phase1.keras
+  /data/output/best_model_isic2024.keras
   /data/output/training_history.pkl
   /data/output/model_architecture.json
   /data/output/model_summary.txt
@@ -37,6 +37,42 @@ from PIL import Image
 from tqdm import tqdm
 
 from augment import oversample_malignant
+try:
+    from mlflow_logging import (
+        end_run,
+        log_artifacts_safe,
+        log_history_safe,
+        log_keras_model_safe,
+        log_metrics_safe,
+        log_params_safe,
+        start_run,
+    )
+except ImportError:
+    import sys
+    sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "utils")))
+    from mlflow_logging import (
+        end_run,
+        log_artifacts_safe,
+        log_history_safe,
+        log_keras_model_safe,
+        log_metrics_safe,
+        log_params_safe,
+        start_run,
+    )
+
+try:
+    from s3_artifacts import get_s3_bucket, maybe_download_prefix
+except ImportError:
+    try:
+        import sys
+        sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "utils")))
+        from s3_artifacts import get_s3_bucket, maybe_download_prefix
+    except ImportError:
+        def get_s3_bucket():
+            return None
+
+        def maybe_download_prefix(env_name, default_prefix, local_dir):
+            return 0
 
 # ── Hyperparameters từ biến môi trường ──────────────────────────────────
 PROCESSED_DIR       = os.environ.get("PROCESSED_DIR", "/data/processed")
@@ -52,6 +88,7 @@ FINE_TUNE_FROM      = int(os.environ.get("FINE_TUNE_FROM_LAYER", "300"))
 PHASE1_LR           = float(os.environ.get("PHASE1_LR", "1e-3"))
 PHASE2_LR           = float(os.environ.get("PHASE2_LR", "1e-4"))
 IMAGE_SIZE          = int(os.environ.get("IMAGE_SIZE", "224"))
+MLFLOW_EXPERIMENT   = os.environ.get("MLFLOW_EXPERIMENT_NAME", "isic2024-efficientnetb3-multimodal")
 
 os.makedirs(OUTPUT_DIR, exist_ok=True)
 IMAGE_DIR  = os.path.join(PROCESSED_DIR, "images")
@@ -153,23 +190,67 @@ def load_split(df: pd.DataFrame,
             np.array(y_list, dtype=np.int32))
 
 
+def _materialized_split_paths(split_name: str) -> tuple[str, str, str] | None:
+    candidates = [
+        (
+            os.path.join(SPLITS_DIR, split_name, f"X_img_{split_name}.npy"),
+            os.path.join(SPLITS_DIR, split_name, f"X_tab_{split_name}.npy"),
+            os.path.join(SPLITS_DIR, split_name, f"y_{split_name}.npy"),
+        ),
+        (
+            os.path.join(SPLITS_DIR, f"X_img_{split_name}.npy"),
+            os.path.join(SPLITS_DIR, f"X_tab_{split_name}.npy"),
+            os.path.join(SPLITS_DIR, f"y_{split_name}.npy"),
+        ),
+    ]
+    for paths in candidates:
+        if all(os.path.exists(path) for path in paths):
+            return paths
+    return None
+
+
+def load_materialized_split(split_name: str) -> tuple[np.ndarray, np.ndarray, np.ndarray] | None:
+    paths = _materialized_split_paths(split_name)
+    if paths is None:
+        return None
+
+    image_path, tabular_path, target_path = paths
+    print(f"Loading materialized split '{split_name}' from {os.path.dirname(image_path)}")
+    X_img = np.load(image_path).astype(np.float32)
+    X_tab = np.load(tabular_path).astype(np.float32)
+    y = np.load(target_path).astype(np.int32).reshape(-1)
+    return X_img, X_tab, y
+
+
 def main():
     print("=" * 60)
     print("ISIC 2024 — Two-Phase Multimodal Training")
     print(f"TF {tf.__version__} | GPU: {tf.config.list_physical_devices('GPU')}")
     print("=" * 60)
 
-    # Load metadata
-    df       = pd.read_pickle(os.path.join(PROCESSED_DIR, "tabular_processed.pkl"))
-    encoders = pickle.load(open(os.path.join(PROCESSED_DIR, "encoders.pkl"), "rb"))
-    feature_cols = encoders["feature_cols"]
-    tabular_dim  = len(feature_cols)
+    maybe_download_prefix("S3_SPLITS_PREFIX", "splits", SPLITS_DIR)
 
-    idx_train = np.load(os.path.join(SPLITS_DIR, "train_idx.npy"))
-    idx_val   = np.load(os.path.join(SPLITS_DIR, "val_idx.npy"))
+    train_split = load_materialized_split("train")
+    val_split = load_materialized_split("val")
+    if train_split is not None and val_split is not None:
+        data_source = "materialized_s3_splits"
+        X_img_train, X_tab_train, y_train = train_split
+        X_img_val, X_tab_val, y_val = val_split
+        tabular_dim = X_tab_train.shape[1]
+    else:
+        data_source = "processed_images_and_split_indices"
+        maybe_download_prefix("S3_PREPROCESSED_PREFIX", "preprocessed", PROCESSED_DIR)
 
-    X_img_train, X_tab_train, y_train = load_split(df, idx_train, feature_cols, "Train")
-    X_img_val,   X_tab_val,   y_val   = load_split(df, idx_val,   feature_cols, "Val")
+        df = pd.read_pickle(os.path.join(PROCESSED_DIR, "tabular_processed.pkl"))
+        encoders = pickle.load(open(os.path.join(PROCESSED_DIR, "encoders.pkl"), "rb"))
+        feature_cols = encoders["feature_cols"]
+        tabular_dim = len(feature_cols)
+
+        idx_train = np.load(os.path.join(SPLITS_DIR, "train_idx.npy"))
+        idx_val = np.load(os.path.join(SPLITS_DIR, "val_idx.npy"))
+
+        X_img_train, X_tab_train, y_train = load_split(df, idx_train, feature_cols, "Train")
+        X_img_val, X_tab_val, y_val = load_split(df, idx_val, feature_cols, "Val")
 
     # Oversampling Malignant
     X_img_os, X_tab_os, y_os = oversample_malignant(
@@ -182,6 +263,47 @@ def main():
     n_pos = int((y_os == 1).sum())
     class_weight = {0: 1.0, 1: (n_neg / n_pos) * CLASS_WEIGHT_MAL}
     print(f"\nClass weights: {class_weight}")
+
+    mlflow = start_run(
+        default_experiment=MLFLOW_EXPERIMENT,
+        default_run_name="train-efficientnetb3-multimodal",
+        tags={
+            "stage": "train",
+            "task": "binary_skin_lesion_classification",
+            "dataset": "ISIC 2024",
+            "model": "EfficientNetB3+MLP",
+        },
+    )
+    log_params_safe(mlflow, {
+        "model_family": "multimodal_skin_isic2024",
+        "image_backbone": "EfficientNetB3",
+        "fusion": "image_branch_plus_tabular_mlp",
+        "loss": "focal_loss",
+        "focal_gamma": 2.0,
+        "focal_alpha": 0.25,
+        "phase1_epochs": PHASE1_EPOCHS,
+        "phase2_epochs": PHASE2_EPOCHS,
+        "batch_size": BATCH_SIZE,
+        "oversample_ratio": OVERSAMPLE_RATIO,
+        "class_weight_malignant_multiplier": CLASS_WEIGHT_MAL,
+        "fine_tune_from_layer": FINE_TUNE_FROM,
+        "phase1_lr": PHASE1_LR,
+        "phase2_lr": PHASE2_LR,
+        "image_size": IMAGE_SIZE,
+        "image_shape": str(IMAGE_SHAPE),
+        "tabular_dim": tabular_dim,
+        "data_source": data_source,
+        "s3_bucket": get_s3_bucket(),
+        "s3_splits_prefix": os.environ.get("S3_SPLITS_PREFIX", "splits"),
+        "train_samples": len(y_train),
+        "val_samples": len(y_val),
+        "oversampled_train_samples": len(y_os),
+        "train_malignant_rate": float(np.mean(y_train == 1)),
+        "val_malignant_rate": float(np.mean(y_val == 1)),
+        "oversampled_malignant_rate": float(np.mean(y_os == 1)),
+        "class_weight_0": class_weight[0],
+        "class_weight_1": class_weight[1],
+    })
 
     # Build model Phase 1 (backbone frozen)
     model, backbone = build_multimodal_model(tabular_dim, freeze_backbone=True)
@@ -204,7 +326,7 @@ def main():
     cb_phase1 = [
         EarlyStopping(monitor="val_auc", patience=5,
                       restore_best_weights=True, mode="max", verbose=1),
-        ModelCheckpoint(os.path.join(OUTPUT_DIR, "best_model_phase1.h5"),
+        ModelCheckpoint(os.path.join(OUTPUT_DIR, "best_model_phase1.keras"),
                         monitor="val_auc", save_best_only=True,
                         mode="max", verbose=1),
         ReduceLROnPlateau(monitor="val_auc", factor=0.5,
@@ -239,7 +361,7 @@ def main():
     cb_phase2 = [
         EarlyStopping(monitor="val_auc", patience=7,
                       restore_best_weights=True, mode="max", verbose=1),
-        ModelCheckpoint(os.path.join(OUTPUT_DIR, "best_model_isic2024.h5"),
+        ModelCheckpoint(os.path.join(OUTPUT_DIR, "best_model_isic2024.keras"),
                         monitor="val_auc", save_best_only=True,
                         mode="max", verbose=1),
         ReduceLROnPlateau(monitor="val_auc", factor=0.3,
@@ -262,6 +384,29 @@ def main():
     with open(hist_path, "wb") as f:
         pickle.dump({"phase1": history1.history,
                      "phase2": history2.history}, f)
+    step = log_history_safe(mlflow, history1.history, "phase1", start_step=0)
+    log_history_safe(mlflow, history2.history, "phase2", start_step=step)
+    log_metrics_safe(mlflow, {
+        "phase1_epochs_ran": len(history1.history.get("loss", [])),
+        "phase2_epochs_ran": len(history2.history.get("loss", [])),
+    }, prefix="train")
+    log_artifacts_safe(mlflow, [
+        arch_path,
+        summary_path,
+        hist_path,
+        os.path.join(OUTPUT_DIR, "best_model_phase1.keras"),
+        os.path.join(OUTPUT_DIR, "best_model_isic2024.keras"),
+    ], artifact_path="training")
+    log_keras_model_safe(
+        mlflow,
+        model,
+        artifact_path="model",
+        registered_model_name=os.environ.get(
+            "MLFLOW_REGISTERED_MODEL_NAME",
+            "isic2024-efficientnetb3-multimodal",
+        ),
+    )
+    end_run(mlflow)
     print(f"\nLưu training history → {hist_path}")
     print("Training hoàn thành!")
 
