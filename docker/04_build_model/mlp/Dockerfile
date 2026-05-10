@@ -8,6 +8,7 @@ RUN pip install --no-cache-dir \
     tensorflow-cpu==2.16.1
 
 COPY Multimodal/models/build_mlp.py .
+COPY Multimodal/s3_utils.py .
 
 ENV PROCESSED_DIR=/data/processed
 ENV MODEL_DIR=/data/model

@@ -8,6 +8,7 @@ RUN pip install --no-cache-dir \
     scikit-learn==1.5.0
 
 COPY Multimodal/data_loader/dataloader.py .
+COPY Multimodal/s3_utils.py .
 
 ENV PROCESSED_DIR=/data/processed
 ENV SPLITS_DIR=/data/splits

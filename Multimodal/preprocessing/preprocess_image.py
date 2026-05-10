@@ -1,87 +1,142 @@
 """
-preprocess_image.py — Bước 2a: Tiền xử lý ảnh da liễu từ HDF5
-Pipeline: Resize → CLAHE → Gaussian Blur → Contrast ×1.2 → Lưu PNG
-Đầu vào : /data/raw/train-image.hdf5
-Đầu ra  : /data/processed/images/<isic_id>.png
+preprocess_image.py — Bước 2a: Trích xuất HDF5 → tiền xử lý → lưu S3
+
+Đọc  : s3://kltn-isic-2024-challenge/isic-2024-challenge/train-image.hdf5  (stream)
+        s3://kltn-isic-2024-colab/raw/metadata.csv  (nhãn + isic_id)
+
+Ghi  :
+  s3://kltn-isic-2024-colab/raw/images/<isic_id>.jpg          ← bytes gốc từ HDF5
+  s3://kltn-isic-2024-colab/preprocessed/images/<isic_id>.png ← sau CLAHE+Gaussian+Contrast
+
+Pipeline ảnh (khớp notebook cell 28):
+  Resize(224×224) → CLAHE(clipLimit=2.0, tile=8×8) → GaussianBlur(3×3) → Contrast×1.2
 """
-import os
 import io
+import os
+import tempfile
 import numpy as np
 import cv2
 import h5py
 from PIL import Image, ImageEnhance
 from tqdm import tqdm
 
-RAW_DIR       = os.environ.get("RAW_DIR", "/data/raw")
-PROCESSED_DIR = os.environ.get("PROCESSED_DIR", "/data/processed")
-IMAGE_SIZE    = int(os.environ.get("IMAGE_SIZE", "224"))
-MAX_IMAGES    = os.environ.get("MAX_IMAGES", "")  # "" = xử lý tất cả
+from s3_utils import (
+    get_s3_client,
+    download_bytes, upload_bytes, load_csv,
+    s3_key_exists,
+    S3_INPUT_BUCKET, S3_INPUT_PREFIX, S3_OUTPUT_BUCKET,
+)
 
-HDF5_PATH  = os.path.join(RAW_DIR, "train-image.hdf5")
-OUTPUT_DIR = os.path.join(PROCESSED_DIR, "images")
-os.makedirs(OUTPUT_DIR, exist_ok=True)
+IMAGE_SIZE = int(os.environ.get("IMAGE_SIZE", "224"))
+MAX_IMAGES = os.environ.get("MAX_IMAGES", "")    # "" = tất cả
 
 
-def preprocess_image(img_array: np.ndarray,
-                     apply_clahe: bool = True,
-                     apply_gaussian: bool = True,
-                     enhance_contrast: float = 1.2) -> np.ndarray:
+def preprocess_image(img_array: np.ndarray) -> np.ndarray:
     """
-    Áp dụng pipeline tiền xử lý ảnh da liễu:
-      1. Resize về IMAGE_SIZE × IMAGE_SIZE
-      2. CLAHE (clipLimit=2.0, tileGridSize=8×8) — cân bằng histogram cục bộ
-      3. Gaussian Blur (kernel 3×3) — giảm nhiễu
-      4. Tăng contrast 20%
+    Pipeline tiền xử lý khớp notebook cell 28:
+      1. Resize → IMAGE_SIZE × IMAGE_SIZE
+      2. CLAHE (clipLimit=2.0, tileGridSize=8×8) trên kênh L của LAB
+      3. GaussianBlur kernel (3,3)
+      4. Contrast ×1.2
+    Trả về: uint8 RGB [H, W, 3]
     """
-    # Resize
     img = cv2.resize(img_array, (IMAGE_SIZE, IMAGE_SIZE),
                      interpolation=cv2.INTER_AREA)
 
-    # CLAHE trên kênh L của không gian LAB
-    if apply_clahe:
-        lab = cv2.cvtColor(img, cv2.COLOR_RGB2LAB)
-        l, a, b = cv2.split(lab)
-        clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
-        l_eq = clahe.apply(l)
-        lab_eq = cv2.merge([l_eq, a, b])
-        img = cv2.cvtColor(lab_eq, cv2.COLOR_LAB2RGB)
+    # CLAHE
+    lab = cv2.cvtColor(img, cv2.COLOR_RGB2LAB)
+    clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
+    lab[:, :, 0] = clahe.apply(lab[:, :, 0])
+    img = cv2.cvtColor(lab, cv2.COLOR_LAB2RGB)
 
     # Gaussian Blur
-    if apply_gaussian:
-        img = cv2.GaussianBlur(img, (3, 3), sigmaX=0)
+    img = cv2.GaussianBlur(img, (3, 3), 0)
 
-    # Tăng contrast ×1.2
-    if enhance_contrast != 1.0:
-        pil_img = Image.fromarray(img)
-        enhancer = ImageEnhance.Contrast(pil_img)
-        img = np.array(enhancer.enhance(enhance_contrast))
+    # Contrast ×1.2
+    pil = Image.fromarray(img)
+    img = np.array(ImageEnhance.Contrast(pil).enhance(1.2))
 
-    return img
+    return img.astype(np.uint8)
 
 
 def main():
-    print(f"Mở HDF5: {HDF5_PATH}")
-    with h5py.File(HDF5_PATH, "r") as f:
-        keys = list(f.keys())
-        if MAX_IMAGES:
-            keys = keys[:int(MAX_IMAGES)]
-        print(f"Số ảnh cần xử lý: {len(keys)}")
+    print("=" * 60)
+    print("BƯỚC 2a: Tiền xử lý ảnh từ HDF5 → S3")
+    print(f"  Image size: {IMAGE_SIZE}×{IMAGE_SIZE}")
+    print("=" * 60)
 
-        for isic_id in tqdm(keys, desc="Preprocessing images"):
-            out_path = os.path.join(OUTPUT_DIR, f"{isic_id}.png")
-            if os.path.exists(out_path):
-                continue  # Bỏ qua nếu đã xử lý
+    # Đọc metadata để biết danh sách isic_id + nhãn
+    df_meta = load_csv("raw/metadata.csv", bucket=S3_OUTPUT_BUCKET)
+    print(f"Metadata: {len(df_meta):,} mẫu")
 
-            # Đọc bytes từ HDF5
-            img_bytes = np.array(f[isic_id])
-            img_pil = Image.open(io.BytesIO(img_bytes)).convert("RGB")
-            img_arr = np.array(img_pil)
+    mal_ids = df_meta[df_meta["target"] == 1]["isic_id"].tolist()
+    ben_ids = df_meta[df_meta["target"] == 0]["isic_id"].tolist()
 
-            img_processed = preprocess_image(img_arr)
+    # Lấy TẤT CẢ Malignant + sample Benign (khớp notebook cell 25)
+    n_mal = len(mal_ids)
+    n_ben = min(10000, len(ben_ids))
+    np.random.seed(42)
+    selected_ben = np.random.choice(ben_ids, size=n_ben, replace=False).tolist()
+    selected_ids = set(mal_ids + selected_ben)
 
-            Image.fromarray(img_processed).save(out_path, format="PNG")
+    if MAX_IMAGES:
+        selected_ids = set(list(selected_ids)[:int(MAX_IMAGES)])
 
-    print(f"Hoàn thành! Ảnh đã lưu vào {OUTPUT_DIR}")
+    print(f"Sẽ xử lý: {len(selected_ids):,} ảnh "
+          f"(Mal={n_mal}, Ben={n_ben})")
+
+    # Tải HDF5 vào file tạm (streaming từ S3)
+    hdf5_key = f"{S3_INPUT_PREFIX}/train-image.hdf5"
+    print(f"\nĐang tải HDF5 từ s3://{S3_INPUT_BUCKET}/{hdf5_key} ...")
+    s3 = get_s3_client()
+    with tempfile.NamedTemporaryFile(suffix=".hdf5", delete=False) as tmp:
+        s3.download_file(S3_INPUT_BUCKET, hdf5_key, tmp.name)
+        hdf5_local = tmp.name
+
+    print("Bắt đầu trích xuất + tiền xử lý ảnh...")
+    extracted = preprocessed = skipped = errors = 0
+
+    with h5py.File(hdf5_local, "r") as hf:
+        all_keys = list(hf.keys())
+        for isic_id in tqdm(all_keys, desc="Processing"):
+            if isic_id not in selected_ids:
+                continue
+
+            try:
+                img_bytes = bytes(hf[isic_id][()])
+
+                # ── raw/images/<id>.jpg ← bytes gốc từ HDF5
+                raw_key = f"raw/images/{isic_id}.jpg"
+                if not s3_key_exists(raw_key, S3_OUTPUT_BUCKET):
+                    upload_bytes(img_bytes, raw_key, S3_OUTPUT_BUCKET)
+                extracted += 1
+
+                # ── preprocessed/images/<id>.png ← sau pipeline
+                pre_key = f"preprocessed/images/{isic_id}.png"
+                if not s3_key_exists(pre_key, S3_OUTPUT_BUCKET):
+                    img_pil = Image.open(io.BytesIO(img_bytes)).convert("RGB")
+                    img_arr = np.array(img_pil)
+                    img_proc = preprocess_image(img_arr)
+
+                    buf = io.BytesIO()
+                    Image.fromarray(img_proc).save(buf, format="PNG")
+                    upload_bytes(buf.getvalue(), pre_key, S3_OUTPUT_BUCKET)
+                    preprocessed += 1
+                else:
+                    skipped += 1
+
+            except Exception as e:
+                errors += 1
+                if errors <= 5:
+                    print(f"  Lỗi {isic_id}: {e}")
+
+    os.unlink(hdf5_local)
+    print(f"\nKết quả:")
+    print(f"  Đã extract : {extracted:,} ảnh → s3://{S3_OUTPUT_BUCKET}/raw/images/")
+    print(f"  Đã preprocess: {preprocessed:,} → s3://{S3_OUTPUT_BUCKET}/preprocessed/images/")
+    print(f"  Bỏ qua (đã có): {skipped:,}")
+    print(f"  Lỗi: {errors}")
+    print("\nBước 2a hoàn thành!")
 
 
 if __name__ == "__main__":

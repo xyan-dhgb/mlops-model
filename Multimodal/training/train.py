@@ -1,80 +1,75 @@
 """
-train.py — Bước 5: Huấn luyện 2 giai đoạn (EfficientNetB3 + MLP Multimodal)
-Phase 1: Backbone frozen  | LR=1e-3 | 20 epochs | EarlyStopping(val_auc, patience=5)
-Phase 2: Unfreeze ≥ 300   | LR=1e-4 | 10 epochs | EarlyStopping(val_auc, patience=7)
+train.py — Bước 5: Huấn luyện 2 giai đoạn Multimodal
 
-Đầu vào:
-  /data/processed/images/<isic_id>.png
-  /data/processed/tabular_processed.pkl
-  /data/processed/encoders.pkl
-  /data/splits/{train,val}_idx.npy
-  /data/model/efficientnetB3_meta.json
-  /data/model/mlp_meta.json
+Đọc từ S3:
+  s3://kltn-isic-2024-colab/splits/train/X_tab_train.npy
+  s3://kltn-isic-2024-colab/splits/train/X_img_train.npy
+  s3://kltn-isic-2024-colab/splits/train/y_train.npy
+  s3://kltn-isic-2024-colab/splits/val/  (tương tự)
+  s3://kltn-isic-2024-colab/preprocessed/encoders.pkl
 
-Đầu ra:
-  /data/output/best_model_phase1.h5
-  /data/output/best_model_isic2024.h5
-  /data/output/training_history.pkl
-  /data/output/model_architecture.json
-  /data/output/model_summary.txt
+Ghi lên S3:
+  s3://kltn-isic-2024-colab/preprocessed/best_model_phase1.h5
+  s3://kltn-isic-2024-colab/preprocessed/best_model_isic2024.h5
+  s3://kltn-isic-2024-colab/preprocessed/training_history.pkl
+  s3://kltn-isic-2024-colab/preprocessed/model_architecture.json
+
+Khớp notebook cell 36 (train_model):
+  Phase 1: backbone frozen, LR=1e-3, EarlyStopping(val_auc, patience=5)
+  Phase 2: unfreeze ≥ layer 300, LR=1e-4, EarlyStopping(val_auc, patience=7)
+  class_weight: (n_neg/n_pos)×1.2  [giảm từ 1.5 → 1.2 như notebook]
 """
-import os
+import io
 import json
+import os
 import pickle
+import tempfile
 import numpy as np
-import pandas as pd
 import tensorflow as tf
+from tensorflow.keras.applications import EfficientNetB3
 from tensorflow.keras.models import Model
 from tensorflow.keras.layers import (
     Input, Dense, Dropout, Concatenate,
     GlobalAveragePooling2D, BatchNormalization,
 )
-from tensorflow.keras.applications import EfficientNetB3
 from tensorflow.keras.callbacks import (
     EarlyStopping, ModelCheckpoint, ReduceLROnPlateau,
 )
-from PIL import Image
-from tqdm import tqdm
 
 from augment import oversample_malignant
+from s3_utils import (
+    load_npy, load_pkl, save_pkl, upload_bytes,
+    save_keras_model,
+    S3_OUTPUT_BUCKET,
+)
 
-# ── Hyperparameters từ biến môi trường ──────────────────────────────────
-PROCESSED_DIR       = os.environ.get("PROCESSED_DIR", "/data/processed")
-SPLITS_DIR          = os.environ.get("SPLITS_DIR", "/data/splits")
-MODEL_DIR           = os.environ.get("MODEL_DIR", "/data/model")
-OUTPUT_DIR          = os.environ.get("OUTPUT_DIR", "/data/output")
-PHASE1_EPOCHS       = int(os.environ.get("PHASE1_EPOCHS", "20"))
-PHASE2_EPOCHS       = int(os.environ.get("PHASE2_EPOCHS", "10"))
-BATCH_SIZE          = int(os.environ.get("BATCH_SIZE", "32"))
-OVERSAMPLE_RATIO    = float(os.environ.get("OVERSAMPLE_RATIO", "0.25"))
-CLASS_WEIGHT_MAL    = float(os.environ.get("CLASS_WEIGHT_MAL", "1.2"))
-FINE_TUNE_FROM      = int(os.environ.get("FINE_TUNE_FROM_LAYER", "300"))
-PHASE1_LR           = float(os.environ.get("PHASE1_LR", "1e-3"))
-PHASE2_LR           = float(os.environ.get("PHASE2_LR", "1e-4"))
-IMAGE_SIZE          = int(os.environ.get("IMAGE_SIZE", "224"))
-
-os.makedirs(OUTPUT_DIR, exist_ok=True)
-IMAGE_DIR  = os.path.join(PROCESSED_DIR, "images")
-IMAGE_SHAPE = (IMAGE_SIZE, IMAGE_SIZE, 3)
+# ── Hyperparameters ──────────────────────────────────────────────────────
+PHASE1_EPOCHS    = int(os.environ.get("PHASE1_EPOCHS", "20"))
+PHASE2_EPOCHS    = int(os.environ.get("PHASE2_EPOCHS", "10"))
+BATCH_SIZE       = int(os.environ.get("BATCH_SIZE", "32"))
+OVERSAMPLE_RATIO = float(os.environ.get("OVERSAMPLE_RATIO", "0.25"))
+CLASS_W_MAL      = float(os.environ.get("CLASS_WEIGHT_MAL", "1.2"))
+FINE_TUNE_FROM   = int(os.environ.get("FINE_TUNE_FROM_LAYER", "300"))
+PHASE1_LR        = float(os.environ.get("PHASE1_LR", "1e-3"))
+PHASE2_LR        = float(os.environ.get("PHASE2_LR", "1e-4"))
+IMAGE_SIZE       = int(os.environ.get("IMAGE_SIZE", "224"))
+IMAGE_SHAPE      = (IMAGE_SIZE, IMAGE_SIZE, 3)
 
 
-# ── Focal Loss ───────────────────────────────────────────────────────────
 def focal_loss(gamma: float = 2.0, alpha: float = 0.25):
-    def focal_loss_fn(y_true, y_pred):
-        y_true = tf.cast(y_true, tf.float32)
-        bce    = tf.keras.backend.binary_crossentropy(y_true, y_pred)
-        p_t    = y_true * y_pred + (1 - y_true) * (1 - y_pred)
+    def fn(y_true, y_pred):
+        y_true  = tf.cast(y_true, tf.float32)
+        bce     = tf.keras.backend.binary_crossentropy(y_true, y_pred)
+        p_t     = y_true * y_pred + (1 - y_true) * (1 - y_pred)
         alpha_t = y_true * alpha + (1 - y_true) * (1 - alpha)
         return tf.reduce_mean(alpha_t * tf.pow(1.0 - p_t, gamma) * bce)
-    focal_loss_fn.__name__ = "focal_loss"
-    return focal_loss_fn
+    fn.__name__ = "focal_loss"
+    return fn
 
 
-# ── Build full multimodal model ──────────────────────────────────────────
-def build_multimodal_model(tabular_dim: int,
-                            freeze_backbone: bool = True) -> tuple:
-    image_input  = Input(shape=IMAGE_SHAPE, name="image_input")
-    backbone     = EfficientNetB3(
+def build_multimodal_model(tabular_dim: int, freeze_backbone: bool = True):
+    image_input = Input(shape=IMAGE_SHAPE, name="image_input")
+    backbone = EfficientNetB3(
         include_top=False, weights="imagenet",
         input_tensor=image_input, pooling=None,
     )
@@ -91,8 +86,8 @@ def build_multimodal_model(tabular_dim: int,
     x = Dense(128, activation="relu")(x)
     x = Dropout(0.3)(x)
 
-    tabular_input = Input(shape=(tabular_dim,), name="tabular_input")
-    y_tab = Dense(128, activation="relu")(tabular_input)
+    tab_input = Input(shape=(tabular_dim,), name="tabular_input")
+    y_tab = Dense(128, activation="relu")(tab_input)
     y_tab = BatchNormalization()(y_tab)
     y_tab = Dropout(0.3)(y_tab)
     y_tab = Dense(64, activation="relu")(y_tab)
@@ -107,20 +102,18 @@ def build_multimodal_model(tabular_dim: int,
     z = Dropout(0.3)(z)
     z = Dense(64, activation="relu")(z)
     z = Dropout(0.2)(z)
-
     output = Dense(1, activation="sigmoid", name="output")(z)
-    model  = Model(inputs=[image_input, tabular_input], outputs=output)
+
+    model = Model(inputs=[image_input, tab_input], outputs=output)
     return model, backbone
 
 
-def compile_model(model, lr: float):
+def compile_model(model, lr):
     model.compile(
         optimizer=tf.keras.optimizers.Adam(learning_rate=lr),
-        loss=focal_loss(gamma=2.0, alpha=0.25),
+        loss=focal_loss(),
         metrics=[
             tf.keras.metrics.AUC(name="auc"),
-            tf.keras.metrics.AUC(name="pauc", num_thresholds=1000,
-                                  summation_method="interpolation", curve="ROC"),
             tf.keras.metrics.Recall(name="recall"),
             tf.keras.metrics.Precision(name="precision"),
         ],
@@ -128,101 +121,79 @@ def compile_model(model, lr: float):
     return model
 
 
-# ── Tải dữ liệu ─────────────────────────────────────────────────────────
-def load_split(df: pd.DataFrame,
-               idx: np.ndarray,
-               feature_cols: list,
-               split_name: str = "") -> tuple:
-    """Tải ảnh PNG + tabular cho một split, trả về (X_img, X_tab, y)."""
-    records = df.iloc[idx].reset_index(drop=True)
-    X_img, X_tab, y_list = [], [], []
-
-    print(f"Đang tải {split_name} ({len(records)} mẫu)...")
-    for _, row in tqdm(records.iterrows(), total=len(records)):
-        isic_id = row.get("isic_id", row.get("isic_id", None))
-        img_path = os.path.join(IMAGE_DIR, f"{isic_id}.png")
-        if not os.path.exists(img_path):
-            continue
-        img = np.array(Image.open(img_path).convert("RGB"), dtype=np.float32) / 255.0
-        X_img.append(img)
-        X_tab.append(row[feature_cols].values.astype(np.float32))
-        y_list.append(int(row["target"]))
-
-    return (np.array(X_img, dtype=np.float32),
-            np.array(X_tab, dtype=np.float32),
-            np.array(y_list, dtype=np.int32))
-
-
 def main():
     print("=" * 60)
-    print("ISIC 2024 — Two-Phase Multimodal Training")
-    print(f"TF {tf.__version__} | GPU: {tf.config.list_physical_devices('GPU')}")
+    print("BƯỚC 5: Two-Phase Training")
+    print(f"  GPU: {tf.config.list_physical_devices('GPU')}")
+    print(f"  Bucket: s3://{S3_OUTPUT_BUCKET}/preprocessed/")
     print("=" * 60)
 
-    # Load metadata
-    df       = pd.read_pickle(os.path.join(PROCESSED_DIR, "tabular_processed.pkl"))
-    encoders = pickle.load(open(os.path.join(PROCESSED_DIR, "encoders.pkl"), "rb"))
-    feature_cols = encoders["feature_cols"]
-    tabular_dim  = len(feature_cols)
+    # ── Load splits từ S3 ────────────────────────────────────────────────
+    print("\nĐọc splits từ S3...")
+    X_tab_train = load_npy("splits/train/X_tab_train.npy", bucket=S3_OUTPUT_BUCKET)
+    X_img_train = load_npy("splits/train/X_img_train.npy", bucket=S3_OUTPUT_BUCKET)
+    y_train     = load_npy("splits/train/y_train.npy",     bucket=S3_OUTPUT_BUCKET)
+    X_tab_val   = load_npy("splits/val/X_tab_val.npy",     bucket=S3_OUTPUT_BUCKET)
+    X_img_val   = load_npy("splits/val/X_img_val.npy",     bucket=S3_OUTPUT_BUCKET)
+    y_val       = load_npy("splits/val/y_val.npy",         bucket=S3_OUTPUT_BUCKET)
 
-    idx_train = np.load(os.path.join(SPLITS_DIR, "train_idx.npy"))
-    idx_val   = np.load(os.path.join(SPLITS_DIR, "val_idx.npy"))
+    encoders     = load_pkl("preprocessed/encoders.pkl", bucket=S3_OUTPUT_BUCKET)
+    tabular_dim  = len(encoders["feature_cols"])
+    print(f"  Train: {len(y_train):,} | Val: {len(y_val):,} | tabular_dim={tabular_dim}")
 
-    X_img_train, X_tab_train, y_train = load_split(df, idx_train, feature_cols, "Train")
-    X_img_val,   X_tab_val,   y_val   = load_split(df, idx_val,   feature_cols, "Val")
-
-    # Oversampling Malignant
+    # ── Oversampling Malignant (cell 36) ────────────────────────────────
     X_img_os, X_tab_os, y_os = oversample_malignant(
         X_img_train, X_tab_train, y_train,
         target_ratio=OVERSAMPLE_RATIO, strong_aug=True,
     )
 
-    # Class weights
+    # Class weight ×1.2 (giảm từ 1.5 → 1.2 như notebook)
     n_neg = int((y_os == 0).sum())
     n_pos = int((y_os == 1).sum())
-    class_weight = {0: 1.0, 1: (n_neg / n_pos) * CLASS_WEIGHT_MAL}
+    class_weight = {0: 1.0, 1: (n_neg / n_pos) * CLASS_W_MAL}
     print(f"\nClass weights: {class_weight}")
 
-    # Build model Phase 1 (backbone frozen)
+    # ── Build model ──────────────────────────────────────────────────────
     model, backbone = build_multimodal_model(tabular_dim, freeze_backbone=True)
     model = compile_model(model, PHASE1_LR)
 
-    # Lưu architecture và summary
-    arch_path = os.path.join(OUTPUT_DIR, "model_architecture.json")
-    with open(arch_path, "w") as f:
-        f.write(model.to_json())
+    # Lưu architecture
+    upload_bytes(
+        model.to_json().encode(),
+        "preprocessed/model_architecture.json",
+        bucket=S3_OUTPUT_BUCKET,
+    )
 
-    summary_path = os.path.join(OUTPUT_DIR, "model_summary.txt")
-    with open(summary_path, "w") as f:
-        model.summary(print_fn=lambda s: f.write(s + "\n"))
-
-    # ── PHASE 1 ─────────────────────────────────────────────────────────
+    # ── PHASE 1 (cell 36: frozen, patience=5) ───────────────────────────
     print("\n" + "=" * 60)
-    print("PHASE 1: Frozen backbone — Train Fusion Head + MLP")
+    print("PHASE 1: Frozen backbone")
     print("=" * 60)
 
-    cb_phase1 = [
+    with tempfile.NamedTemporaryFile(suffix=".h5", delete=False) as tmp1:
+        phase1_local = tmp1.name
+
+    cb1 = [
         EarlyStopping(monitor="val_auc", patience=5,
                       restore_best_weights=True, mode="max", verbose=1),
-        ModelCheckpoint(os.path.join(OUTPUT_DIR, "best_model_phase1.h5"),
-                        monitor="val_auc", save_best_only=True,
-                        mode="max", verbose=1),
+        ModelCheckpoint(phase1_local, monitor="val_auc",
+                        save_best_only=True, mode="max", verbose=1),
         ReduceLROnPlateau(monitor="val_auc", factor=0.5,
                           patience=3, min_lr=1e-6, verbose=1),
     ]
 
-    history1 = model.fit(
+    h1 = model.fit(
         {"image_input": X_img_os, "tabular_input": X_tab_os}, y_os,
-        validation_data=({"image_input": X_img_val,
-                          "tabular_input": X_tab_val}, y_val),
-        epochs=PHASE1_EPOCHS,
-        batch_size=BATCH_SIZE,
-        callbacks=cb_phase1,
-        class_weight=class_weight,
-        verbose=1,
+        validation_data=({"image_input": X_img_val, "tabular_input": X_tab_val}, y_val),
+        epochs=PHASE1_EPOCHS, batch_size=BATCH_SIZE,
+        callbacks=cb1, class_weight=class_weight, verbose=1,
     )
 
-    # ── PHASE 2 ─────────────────────────────────────────────────────────
+    # Upload phase1 model lên S3
+    from s3_utils import upload_file
+    upload_file(phase1_local, "preprocessed/best_model_phase1.h5", bucket=S3_OUTPUT_BUCKET)
+    os.unlink(phase1_local)
+
+    # ── PHASE 2 (cell 36: unfreeze ≥ layer 300, patience=7) ─────────────
     print("\n" + "=" * 60)
     print(f"PHASE 2: Fine-tune EfficientNetB3 từ layer {FINE_TUNE_FROM}")
     print("=" * 60)
@@ -231,39 +202,43 @@ def main():
     for layer in backbone.layers[:FINE_TUNE_FROM]:
         layer.trainable = False
 
-    n_unfreeze = sum(1 for l in backbone.layers if l.trainable)
-    print(f"Mở đóng băng: {n_unfreeze}/{len(backbone.layers)} layers")
+    print(f"Layers mở đóng băng: "
+          f"{sum(1 for l in backbone.layers if l.trainable)}/{len(backbone.layers)}")
 
     model = compile_model(model, PHASE2_LR)
 
-    cb_phase2 = [
+    with tempfile.NamedTemporaryFile(suffix=".h5", delete=False) as tmp2:
+        best_local = tmp2.name
+
+    cb2 = [
         EarlyStopping(monitor="val_auc", patience=7,
                       restore_best_weights=True, mode="max", verbose=1),
-        ModelCheckpoint(os.path.join(OUTPUT_DIR, "best_model_isic2024.h5"),
-                        monitor="val_auc", save_best_only=True,
-                        mode="max", verbose=1),
+        ModelCheckpoint(best_local, monitor="val_auc",
+                        save_best_only=True, mode="max", verbose=1),
         ReduceLROnPlateau(monitor="val_auc", factor=0.3,
                           patience=3, min_lr=1e-7, verbose=1),
     ]
 
-    history2 = model.fit(
+    h2 = model.fit(
         {"image_input": X_img_os, "tabular_input": X_tab_os}, y_os,
-        validation_data=({"image_input": X_img_val,
-                          "tabular_input": X_tab_val}, y_val),
-        epochs=PHASE2_EPOCHS,
-        batch_size=BATCH_SIZE,
-        callbacks=cb_phase2,
-        class_weight=class_weight,
-        verbose=1,
+        validation_data=({"image_input": X_img_val, "tabular_input": X_tab_val}, y_val),
+        epochs=PHASE2_EPOCHS, batch_size=BATCH_SIZE,
+        callbacks=cb2, class_weight=class_weight, verbose=1,
     )
 
-    # Lưu training history
-    hist_path = os.path.join(OUTPUT_DIR, "training_history.pkl")
-    with open(hist_path, "wb") as f:
-        pickle.dump({"phase1": history1.history,
-                     "phase2": history2.history}, f)
-    print(f"\nLưu training history → {hist_path}")
-    print("Training hoàn thành!")
+    # Upload best model
+    upload_file(best_local, "preprocessed/best_model_isic2024.h5", bucket=S3_OUTPUT_BUCKET)
+    os.unlink(best_local)
+
+    # Lưu history
+    save_pkl(
+        {"phase1": h1.history, "phase2": h2.history},
+        "preprocessed/training_history.pkl",
+        bucket=S3_OUTPUT_BUCKET,
+    )
+
+    print(f"\nModel → s3://{S3_OUTPUT_BUCKET}/preprocessed/best_model_isic2024.h5")
+    print("\nBước 5 hoàn thành!")
 
 
 if __name__ == "__main__":

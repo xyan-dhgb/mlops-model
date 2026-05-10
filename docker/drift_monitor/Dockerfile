@@ -10,6 +10,7 @@ RUN pip install --no-cache-dir \
     schedule==1.2.1
 
 COPY Multimodal/drift_monitor/drift_monitor.py .
+COPY Multimodal/s3_utils.py .
 
 ENV EVAL_DIR=/data/eval
 ENV PRODUCTION_LOG_DIR=/data/production_logs

@@ -17,6 +17,7 @@ RUN pip install --no-cache-dir \
 
 COPY Multimodal/training/train.py .
 COPY Multimodal/training/augment.py .
+COPY Multimodal/s3_utils.py .
 
 ENV PROCESSED_DIR=/data/processed
 ENV SPLITS_DIR=/data/splits

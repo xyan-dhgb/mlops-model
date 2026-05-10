@@ -1,78 +1,145 @@
 """
-dataloader.py — Bước 3: Stratified split 64%/16%/20%
-Đầu vào : /data/processed/tabular_processed.pkl
-Đầu ra  : /data/splits/{train,val,test}_idx.npy
-           /data/splits/split_info.json
+dataloader.py — Bước 3: Tạo features array + stratified splits → S3
+
+Đọc :
+  s3://kltn-isic-2024-colab/preprocessed/metadata_clean.csv
+  s3://kltn-isic-2024-colab/preprocessed/encoders.pkl
+  s3://kltn-isic-2024-colab/preprocessed/images/<isic_id>.png  (streaming)
+
+Ghi (khớp cấu trúc notebook cell 70):
+  s3://kltn-isic-2024-colab/features/X_tabular.npy
+  s3://kltn-isic-2024-colab/features/X_images.npy
+  s3://kltn-isic-2024-colab/features/y_labels.npy
+
+  s3://kltn-isic-2024-colab/splits/train/X_tab_train.npy
+  s3://kltn-isic-2024-colab/splits/train/X_img_train.npy
+  s3://kltn-isic-2024-colab/splits/train/y_train.npy
+  s3://kltn-isic-2024-colab/splits/val/X_tab_val.npy
+  s3://kltn-isic-2024-colab/splits/val/X_img_val.npy
+  s3://kltn-isic-2024-colab/splits/val/y_val.npy
+  s3://kltn-isic-2024-colab/splits/test/X_tab_test.npy
+  s3://kltn-isic-2024-colab/splits/test/X_img_test.npy
+  s3://kltn-isic-2024-colab/splits/test/y_test.npy
+  s3://kltn-isic-2024-colab/splits/split_info.json
 """
-import os
+import io
 import json
+import os
 import numpy as np
-import pandas as pd
+from PIL import Image
+from tqdm import tqdm
 from sklearn.model_selection import train_test_split
 
-PROCESSED_DIR = os.environ.get("PROCESSED_DIR", "/data/processed")
-SPLITS_DIR    = os.environ.get("SPLITS_DIR", "/data/splits")
-RANDOM_SEED   = int(os.environ.get("RANDOM_SEED", "42"))
+from s3_utils import (
+    load_csv, load_pkl, download_bytes,
+    save_npy, upload_bytes,
+    list_s3_keys,
+    S3_OUTPUT_BUCKET,
+)
 
-TAB_PATH = os.path.join(PROCESSED_DIR, "tabular_processed.pkl")
-os.makedirs(SPLITS_DIR, exist_ok=True)
+RANDOM_SEED = int(os.environ.get("RANDOM_SEED", "42"))
+IMAGE_SIZE  = int(os.environ.get("IMAGE_SIZE", "224"))
+
+
+def load_image_from_s3(isic_id: str) -> np.ndarray | None:
+    """Tải ảnh đã preprocessed từ S3, trả về float32 [H,W,3] / None nếu lỗi."""
+    key = f"preprocessed/images/{isic_id}.png"
+    try:
+        data = download_bytes(key, bucket=S3_OUTPUT_BUCKET)
+        img  = Image.open(io.BytesIO(data)).convert("RGB")
+        return np.array(img, dtype=np.float32) / 255.0
+    except Exception as e:
+        return None
 
 
 def main():
-    print(f"Đọc {TAB_PATH}")
-    df = pd.read_pickle(TAB_PATH)
+    print("=" * 60)
+    print("BƯỚC 3: Tạo features array + splits → S3")
+    print(f"  Bucket: s3://{S3_OUTPUT_BUCKET}/")
+    print("=" * 60)
 
-    y = df["target"].values
-    indices = np.arange(len(df))
+    df       = load_csv("preprocessed/metadata_clean.csv", bucket=S3_OUTPUT_BUCKET)
+    encoders = load_pkl("preprocessed/encoders.pkl",      bucket=S3_OUTPUT_BUCKET)
+    feature_cols = encoders["feature_cols"]
 
-    print(f"Tổng mẫu: {len(indices)}")
-    print(f"Malignant: {y.sum()} ({100*y.mean():.2f}%)")
-    print(f"Benign   : {(1-y).sum()} ({100*(1-y).mean():.2f}%)")
+    # Kiểm tra ảnh có trên S3 không
+    print("\nKiểm tra ảnh đã preprocessed trên S3...")
+    existing_keys = list_s3_keys("preprocessed/images/", bucket=S3_OUTPUT_BUCKET)
+    existing_ids  = {k.split("/")[-1].replace(".png", "") for k in existing_keys}
+    df_available  = df[df["isic_id"].isin(existing_ids)].reset_index(drop=True)
+    print(f"  Ảnh có sẵn: {len(existing_ids):,}")
+    print(f"  Mẫu khớp  : {len(df_available):,}")
 
-    # Split: 80% trainval / 20% test (stratified)
+    # ── Build arrays (khớp notebook cell 32 + 39) ───────────────────────
+    print("\nĐang tải ảnh + build arrays...")
+    X_tab_list, X_img_list, y_list = [], [], []
+
+    for _, row in tqdm(df_available.iterrows(), total=len(df_available)):
+        img = load_image_from_s3(row["isic_id"])
+        if img is None:
+            continue
+        X_tab_list.append(row[feature_cols].values.astype(np.float32))
+        X_img_list.append(img)
+        y_list.append(int(row["target"]))
+
+    X_tabular = np.array(X_tab_list, dtype=np.float32)
+    X_images  = np.array(X_img_list, dtype=np.float32)
+    y_labels  = np.array(y_list,     dtype=np.int32)
+
+    print(f"\nArrays built:")
+    print(f"  X_tabular : {X_tabular.shape}")
+    print(f"  X_images  : {X_images.shape}")
+    print(f"  y_labels  : {y_labels.shape} (Mal={y_labels.sum()}, Ben={(y_labels==0).sum()})")
+
+    # Lưu features (khớp cell 39 của notebook)
+    save_npy(X_tabular, "features/X_tabular.npy", bucket=S3_OUTPUT_BUCKET)
+    save_npy(X_images,  "features/X_images.npy",  bucket=S3_OUTPUT_BUCKET)
+    save_npy(y_labels,  "features/y_labels.npy",  bucket=S3_OUTPUT_BUCKET)
+
+    # ── Stratified split 64/16/20 (khớp cell 70) ────────────────────────
+    idx = np.arange(len(y_labels))
+
     idx_trainval, idx_test = train_test_split(
-        indices, test_size=0.20,
-        stratify=y, random_state=RANDOM_SEED
+        idx, test_size=0.20, stratify=y_labels, random_state=RANDOM_SEED
     )
-
-    # Split trainval → 80% train / 20% val = 64% / 16% tổng thể
-    y_trainval = y[idx_trainval]
     idx_train, idx_val = train_test_split(
         idx_trainval, test_size=0.20,
-        stratify=y_trainval, random_state=RANDOM_SEED
+        stratify=y_labels[idx_trainval], random_state=RANDOM_SEED
     )
 
-    np.save(os.path.join(SPLITS_DIR, "train_idx.npy"), idx_train)
-    np.save(os.path.join(SPLITS_DIR, "val_idx.npy"),   idx_val)
-    np.save(os.path.join(SPLITS_DIR, "test_idx.npy"),  idx_test)
-
-    # Thống kê split
-    def split_stats(name, idx):
-        ys = y[idx]
-        return {
-            "total": len(idx),
-            "malignant": int(ys.sum()),
-            "benign": int((1-ys).sum()),
-            "malignant_ratio": round(float(ys.mean()), 4)
-        }
-
-    info = {
-        "random_seed": RANDOM_SEED,
-        "train": split_stats("train", idx_train),
-        "val":   split_stats("val",   idx_val),
-        "test":  split_stats("test",  idx_test),
+    splits = {
+        "train": (idx_train, "splits/train/"),
+        "val":   (idx_val,   "splits/val/"),
+        "test":  (idx_test,  "splits/test/"),
     }
 
-    with open(os.path.join(SPLITS_DIR, "split_info.json"), "w") as f:
-        json.dump(info, f, indent=2)
+    # Lưu splits (khớp chính xác tên file notebook cell 70)
+    split_info = {"random_seed": RANDOM_SEED, "splits": {}}
+    for name, (idx_s, prefix) in splits.items():
+        xs = X_tabular[idx_s]
+        xi = X_images[idx_s]
+        ys = y_labels[idx_s]
 
-    print("\nKết quả split:")
-    for split_name, stats in info.items():
-        if isinstance(stats, dict):
-            print(f"  {split_name:6s}: {stats['total']:>7,} mẫu | "
-                  f"Malignant {stats['malignant']:>6,} ({100*stats['malignant_ratio']:.2f}%)")
+        save_npy(xs, f"{prefix}X_tab_{name}.npy",  bucket=S3_OUTPUT_BUCKET)
+        save_npy(xi, f"{prefix}X_img_{name}.npy",  bucket=S3_OUTPUT_BUCKET)
+        save_npy(ys, f"{prefix}y_{name}.npy",       bucket=S3_OUTPUT_BUCKET)
 
-    print(f"\nLưu indices → {SPLITS_DIR}")
+        split_info["splits"][name] = {
+            "total":     len(ys),
+            "malignant": int(ys.sum()),
+            "benign":    int((ys == 0).sum()),
+            "ratio_mal": round(float(ys.mean()), 4),
+        }
+        print(f"  {name:5s}: {len(ys):>6,} mẫu | "
+              f"Mal={ys.sum()} ({100*ys.mean():.1f}%)")
+
+    upload_bytes(
+        json.dumps(split_info, indent=2).encode(),
+        "splits/split_info.json",
+        bucket=S3_OUTPUT_BUCKET,
+    )
+    print(f"\nSplit info → s3://{S3_OUTPUT_BUCKET}/splits/split_info.json")
+    print("\nBước 3 hoàn thành!")
 
 
 if __name__ == "__main__":

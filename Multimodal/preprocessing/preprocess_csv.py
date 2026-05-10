@@ -1,94 +1,113 @@
 """
-preprocess_csv.py — Bước 2b: Tiền xử lý dữ liệu bảng (tabular)
-Pipeline: Load CSV → Impute → Outlier clip → Label Encode → StandardScaler → Lưu pkl
-Đầu vào : /data/raw/train-metadata.csv
-Đầu ra  : /data/processed/tabular_processed.pkl
-           /data/processed/encoders.pkl
+preprocess_csv.py — Bước 2b: Tiền xử lý metadata CSV
+
+Đọc : s3://kltn-isic-2024-colab/raw/metadata.csv
+Ghi :
+  s3://kltn-isic-2024-colab/preprocessed/metadata_clean.csv
+  s3://kltn-isic-2024-colab/preprocessed/encoders.pkl
+
+Pipeline (khớp notebook cell 19 + cell 32):
+  - Chuẩn hóa tên cột
+  - Impute median (numeric) / mode (categorical)
+  - Clip outlier IQR×1.5
+  - LabelEncode: sex, anatom_site_general
+  - StandardScaler cho tất cả feature
+  - Loại exclude_cols (khớp cell 32 của notebook)
 """
 import os
-import pickle
+import io
 import numpy as np
 import pandas as pd
 from sklearn.preprocessing import LabelEncoder, StandardScaler
+from sklearn.impute import SimpleImputer
 
-RAW_DIR       = os.environ.get("RAW_DIR", "/data/raw")
-PROCESSED_DIR = os.environ.get("PROCESSED_DIR", "/data/processed")
+from s3_utils import (
+    load_csv, save_csv, save_pkl, S3_OUTPUT_BUCKET,
+)
 
-CSV_PATH   = os.path.join(RAW_DIR, "train-metadata.csv")
-OUTPUT_TAB = os.path.join(PROCESSED_DIR, "tabular_processed.pkl")
-OUTPUT_ENC = os.path.join(PROCESSED_DIR, "encoders.pkl")
+# Cột loại trừ — khớp notebook cell 32
+EXCLUDE_COLS = [
+    "target", "isic_id", "patient_id", "attribution", "copyright_license",
+    "image_type", "iddx_full", "iddx_1", "iddx_2", "iddx_3", "iddx_4",
+    "iddx_5", "mel_mitotic_index", "mel_thick_mm", "lesion_id",
+]
 
-os.makedirs(PROCESSED_DIR, exist_ok=True)
-
-# ── Cột loại trừ khỏi xử lý feature ────────────────────────────────
-EXCLUDE_COLS  = ["isic_id", "target"]
-CATEGORICAL_COLS = ["sex", "anatom_site_general"]  # điều chỉnh nếu cần
+CAT_COLS = ["sex", "anatom_site_general"]   # encode riêng
 
 
 def main():
-    print(f"Đọc CSV: {CSV_PATH}")
-    df = pd.read_csv(CSV_PATH)
+    print("=" * 60)
+    print("BƯỚC 2b: Tiền xử lý CSV")
+    print(f"  Bucket: s3://{S3_OUTPUT_BUCKET}/preprocessed/")
+    print("=" * 60)
+
+    df = load_csv("raw/metadata.csv", bucket=S3_OUTPUT_BUCKET)
     print(f"Shape gốc: {df.shape}")
 
-    # 1. Chuẩn hóa tên cột
+    # 1. Chuẩn hóa tên cột (cell 19)
     df.columns = (df.columns
                   .str.strip().str.lower()
                   .str.replace(r'\s+', '_', regex=True)
                   .str.replace(r'[^a-z0-9_]', '_', regex=True)
+                  .str.replace(r'_+', '_', regex=True)
                   .str.strip('_'))
 
-    # 2. Impute giá trị thiếu
-    print("\nImpute giá trị thiếu...")
-    numeric_cols = df.select_dtypes(include=["float64", "int64"]).columns.tolist()
-    cat_cols     = df.select_dtypes(include=["object"]).columns.tolist()
+    # 2. Xác định cột feature (khớp cell 32)
+    numeric_cols = df.select_dtypes(include=np.number).columns.tolist()
+    feature_num  = [c for c in numeric_cols if c not in EXCLUDE_COLS]
+    feature_cat  = [c for c in CAT_COLS if c in df.columns]
 
-    feature_numeric = [c for c in numeric_cols if c not in EXCLUDE_COLS]
-    feature_cat     = [c for c in cat_cols     if c not in EXCLUDE_COLS]
+    print(f"Numeric features : {len(feature_num)}")
+    print(f"Categorical feats: {feature_cat}")
 
-    for col in feature_numeric:
-        if df[col].isnull().any():
-            df[col].fillna(df[col].median(), inplace=True)
+    # 3. Impute (cell 32: SimpleImputer median)
+    print("\nImpute missing values...")
+    imputer = SimpleImputer(strategy="median")
+    df[feature_num] = imputer.fit_transform(df[feature_num])
 
     for col in feature_cat:
-        if df[col].isnull().any():
-            mode_val = df[col].mode()
-            df[col].fillna(mode_val[0] if len(mode_val) else "unknown", inplace=True)
+        df[col].fillna(df[col].mode()[0] if not df[col].mode().empty else "unknown",
+                       inplace=True)
 
-    # 3. Clip outlier (IQR) cho cột số — loại bỏ target
-    print("Clip outlier bằng IQR...")
-    for col in feature_numeric:
+    # 4. Clip outlier IQR (cell 19)
+    print("Clip outlier IQR×1.5...")
+    for col in feature_num:
         Q1, Q3 = df[col].quantile(0.25), df[col].quantile(0.75)
         IQR = Q3 - Q1
         df[col] = df[col].clip(Q1 - 1.5 * IQR, Q3 + 1.5 * IQR)
 
-    # 4. Label Encoding cho cột categorical
-    print("Label Encoding...")
+    # 5. LabelEncode categorical (cell 32)
     label_encoders = {}
     for col in feature_cat:
         le = LabelEncoder()
         df[col] = le.fit_transform(df[col].astype(str))
         label_encoders[col] = le
+        if col not in feature_num:
+            feature_num.append(col)
 
-    # 5. StandardScaler cho tất cả cột số feature
-    all_feature_cols = feature_numeric + feature_cat
-    print(f"StandardScaler cho {len(all_feature_cols)} cột feature...")
+    all_feature_cols = feature_num  # numeric + encoded categorical
+
+    # 6. StandardScaler
+    print("StandardScaler...")
     scaler = StandardScaler()
     df[all_feature_cols] = scaler.fit_transform(df[all_feature_cols])
 
-    # 6. Lưu kết quả
-    df.to_pickle(OUTPUT_TAB)
-    print(f"Lưu tabular_processed.pkl → {OUTPUT_TAB}")
+    # 7. Lưu kết quả lên S3
+    save_csv(df, "preprocessed/metadata_clean.csv", bucket=S3_OUTPUT_BUCKET)
 
-    encoders = {
-        "scaler": scaler,
+    encoders_obj = {
+        "scaler":         scaler,
         "label_encoders": label_encoders,
-        "feature_cols": all_feature_cols,
+        "imputer":        imputer,
+        "feature_cols":   all_feature_cols,
     }
-    with open(OUTPUT_ENC, "wb") as f:
-        pickle.dump(encoders, f)
-    print(f"Lưu encoders.pkl → {OUTPUT_ENC}")
+    save_pkl(encoders_obj, "preprocessed/encoders.pkl", bucket=S3_OUTPUT_BUCKET)
 
-    print(f"\nHoàn thành tiền xử lý CSV! Shape cuối: {df.shape}")
+    print(f"\nShape cuối: {df.shape}")
+    print(f"Feature cols: {len(all_feature_cols)}")
+    print(f"Lưu → s3://{S3_OUTPUT_BUCKET}/preprocessed/metadata_clean.csv")
+    print(f"Lưu → s3://{S3_OUTPUT_BUCKET}/preprocessed/encoders.pkl")
+    print("\nBước 2b hoàn thành!")
 
 
 if __name__ == "__main__":

@@ -1,23 +1,26 @@
 """
-evaluate.py — Bước 6: Đánh giá mô hình + Grid-search Threshold
-Metrics: AUC, pAUC (TPR≥0.80), F1, Recall, Precision
-Đầu vào:
-  /data/output/best_model_isic2024.h5
-  /data/processed/tabular_processed.pkl
-  /data/processed/encoders.pkl
-  /data/splits/{val,test}_idx.npy
-Đầu ra:
-  /data/eval/metrics.json
-  /data/eval/best_threshold.txt
-  /data/eval/roc_curve.png
-  /data/eval/confusion_matrix.png
-  /data/eval/baseline_profile.json   ← dùng cho drift monitoring
+evaluate.py — Bước 6: Đánh giá + Grid-search Threshold
+
+Đọc từ S3:
+  preprocessed/best_model_isic2024.h5
+  splits/test/X_tab_test.npy, X_img_test.npy, y_test.npy
+  splits/val/  (cho threshold tuning)
+
+Ghi lên S3:
+  preprocessed/metrics.json
+  preprocessed/best_threshold.txt
+  preprocessed/roc_curve.png
+  preprocessed/confusion_matrix.png
+  preprocessed/baseline_profile.json    ← dùng cho drift monitor
+
+Khớp notebook cell 38 (compute_pauc, find_optimal_threshold):
+  pAUC: TPR ≥ 0.80, chuẩn hóa về [0,1] / (1 - min_tpr)
+  Threshold: grid 0.05→0.95, bước 0.01, min_recall=0.60
 """
-import os
+import io
 import json
-import pickle
+import os
 import numpy as np
-import pandas as pd
 import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
@@ -26,88 +29,83 @@ from sklearn.metrics import (
     roc_auc_score, roc_curve, f1_score,
     recall_score, precision_score, confusion_matrix,
 )
-from PIL import Image
-from tqdm import tqdm
 
-PROCESSED_DIR = os.environ.get("PROCESSED_DIR", "/data/processed")
-SPLITS_DIR    = os.environ.get("SPLITS_DIR", "/data/splits")
-OUTPUT_DIR    = os.environ.get("OUTPUT_DIR", "/data/output")
-EVAL_DIR      = os.environ.get("EVAL_DIR", "/data/eval")
-IMAGE_SIZE    = int(os.environ.get("IMAGE_SIZE", "224"))
-
-os.makedirs(EVAL_DIR, exist_ok=True)
-IMAGE_DIR   = os.path.join(PROCESSED_DIR, "images")
-MODEL_PATH  = os.path.join(OUTPUT_DIR, "best_model_isic2024.h5")
+from s3_utils import (
+    load_npy, load_pkl, load_keras_model,
+    upload_bytes, save_pkl,
+    S3_OUTPUT_BUCKET,
+)
 
 
 def focal_loss(gamma=2.0, alpha=0.25):
-    def focal_loss_fn(y_true, y_pred):
+    def fn(y_true, y_pred):
         y_true  = tf.cast(y_true, tf.float32)
         bce     = tf.keras.backend.binary_crossentropy(y_true, y_pred)
         p_t     = y_true * y_pred + (1 - y_true) * (1 - y_pred)
         alpha_t = y_true * alpha + (1 - y_true) * (1 - alpha)
         return tf.reduce_mean(alpha_t * tf.pow(1.0 - p_t, gamma) * bce)
-    focal_loss_fn.__name__ = "focal_loss"
-    return focal_loss_fn
-
-
-def load_split(df, idx, feature_cols):
-    records = df.iloc[idx].reset_index(drop=True)
-    X_img, X_tab, y_list = [], [], []
-    for _, row in tqdm(records.iterrows(), total=len(records)):
-        img_path = os.path.join(IMAGE_DIR, f"{row['isic_id']}.png")
-        if not os.path.exists(img_path):
-            continue
-        img = np.array(Image.open(img_path).convert("RGB"),
-                       dtype=np.float32) / 255.0
-        X_img.append(img)
-        X_tab.append(row[feature_cols].values.astype(np.float32))
-        y_list.append(int(row["target"]))
-    return (np.array(X_img, dtype=np.float32),
-            np.array(X_tab, dtype=np.float32),
-            np.array(y_list))
+    fn.__name__ = "focal_loss"
+    return fn
 
 
 def compute_pauc(y_true, y_score, min_tpr=0.80):
-    """pAUC tại vùng TPR ≥ min_tpr (metric chính ISIC 2024)."""
+    """pAUC chuẩn hóa — metric chính ISIC 2024. Khớp cell 38."""
     fpr, tpr, _ = roc_curve(y_true, y_score)
     mask = tpr >= min_tpr
     if mask.sum() < 2:
         return 0.0
-    return float(np.trapz(tpr[mask], fpr[mask]))
+    return float(np.trapezoid(tpr[mask], fpr[mask]) / (1.0 - min_tpr))
 
 
-def grid_search_threshold(y_true, y_prob):
-    """Tìm threshold tối ưu theo F1 score trên tập validation."""
+def find_optimal_threshold(y_true, y_prob, min_recall=0.60):
+    """Grid-search threshold. Khớp notebook cell 38."""
     best_f1, best_thr = 0.0, 0.5
-    for thr in np.arange(0.05, 0.96, 0.01):
+    for thr in np.arange(0.05, 0.95, 0.01):
         y_pred = (y_prob >= thr).astype(int)
-        f1 = f1_score(y_true, y_pred, zero_division=0)
-        if f1 > best_f1:
+        tp = int(np.sum((y_true == 1) & (y_pred == 1)))
+        fp = int(np.sum((y_true == 0) & (y_pred == 1)))
+        fn = int(np.sum((y_true == 1) & (y_pred == 0)))
+        recall    = tp / (tp + fn + 1e-8)
+        precision = tp / (tp + fp + 1e-8)
+        f1 = 2 * precision * recall / (precision + recall + 1e-8)
+        if recall >= min_recall and f1 > best_f1:
             best_f1, best_thr = f1, thr
     return round(best_thr, 4), round(best_f1, 4)
 
 
-def main():
-    print("Đang tải model...")
-    model = tf.keras.models.load_model(
-        MODEL_PATH,
-        custom_objects={"focal_loss_fn": focal_loss()},
-    )
+def fig_to_bytes(fig) -> bytes:
+    buf = io.BytesIO()
+    fig.savefig(buf, format="png", dpi=150, bbox_inches="tight")
+    buf.seek(0)
+    return buf.read()
 
-    df       = pd.read_pickle(os.path.join(PROCESSED_DIR, "tabular_processed.pkl"))
-    encoders = pickle.load(open(os.path.join(PROCESSED_DIR, "encoders.pkl"), "rb"))
+
+def main():
+    print("=" * 60)
+    print("BƯỚC 6: Evaluate")
+    print(f"  Bucket: s3://{S3_OUTPUT_BUCKET}/preprocessed/")
+    print("=" * 60)
+
+    model = load_keras_model(
+        "preprocessed/best_model_isic2024.h5",
+        bucket=S3_OUTPUT_BUCKET,
+        custom_objects={"focal_loss": focal_loss()},
+    )
+    encoders     = load_pkl("preprocessed/encoders.pkl", bucket=S3_OUTPUT_BUCKET)
     feature_cols = encoders["feature_cols"]
 
-    idx_val  = np.load(os.path.join(SPLITS_DIR, "val_idx.npy"))
-    idx_test = np.load(os.path.join(SPLITS_DIR, "test_idx.npy"))
+    # Load test và val splits
+    print("\nĐọc test split từ S3...")
+    X_tab_test = load_npy("splits/test/X_tab_test.npy", bucket=S3_OUTPUT_BUCKET)
+    X_img_test = load_npy("splits/test/X_img_test.npy", bucket=S3_OUTPUT_BUCKET)
+    y_test     = load_npy("splits/test/y_test.npy",     bucket=S3_OUTPUT_BUCKET)
 
-    print("Tải tập validation...")
-    X_img_val, X_tab_val, y_val = load_split(df, idx_val, feature_cols)
-    print("Tải tập test...")
-    X_img_test, X_tab_test, y_test = load_split(df, idx_test, feature_cols)
+    print("Đọc val split (threshold tuning)...")
+    X_tab_val  = load_npy("splits/val/X_tab_val.npy", bucket=S3_OUTPUT_BUCKET)
+    X_img_val  = load_npy("splits/val/X_img_val.npy", bucket=S3_OUTPUT_BUCKET)
+    y_val      = load_npy("splits/val/y_val.npy",     bucket=S3_OUTPUT_BUCKET)
 
-    # Dự đoán xác suất
+    # Predict
     prob_val  = model.predict(
         {"image_input": X_img_val,  "tabular_input": X_tab_val},
         batch_size=32, verbose=1).squeeze()
@@ -115,81 +113,78 @@ def main():
         {"image_input": X_img_test, "tabular_input": X_tab_test},
         batch_size=32, verbose=1).squeeze()
 
-    # Grid-search threshold trên validation
-    best_thr, val_f1 = grid_search_threshold(y_val, prob_val)
-    print(f"\nBest threshold (val F1={val_f1:.4f}): {best_thr}")
+    # Threshold từ val
+    best_thr, val_f1 = find_optimal_threshold(y_val, prob_val, min_recall=0.60)
+    print(f"\nBest threshold: {best_thr} (val_f1={val_f1:.4f})")
 
-    # Metrics trên tập test
-    y_pred_test = (prob_test >= best_thr).astype(int)
+    y_pred = (prob_test >= best_thr).astype(int)
     metrics = {
         "auc":            round(float(roc_auc_score(y_test, prob_test)), 4),
-        "pauc":           round(compute_pauc(y_test, prob_test, 0.80), 4),
-        "f1":             round(float(f1_score(y_test, y_pred_test, zero_division=0)), 4),
-        "recall":         round(float(recall_score(y_test, y_pred_test, zero_division=0)), 4),
-        "precision":      round(float(precision_score(y_test, y_pred_test, zero_division=0)), 4),
+        "pauc_norm":      round(compute_pauc(y_test, prob_test, 0.80), 4),
+        "f1":             round(float(f1_score(y_test, y_pred, zero_division=0)), 4),
+        "recall":         round(float(recall_score(y_test, y_pred, zero_division=0)), 4),
+        "precision":      round(float(precision_score(y_test, y_pred, zero_division=0)), 4),
         "best_threshold": best_thr,
     }
     print("\nTest metrics:")
     for k, v in metrics.items():
         print(f"  {k:20s}: {v}")
 
-    with open(os.path.join(EVAL_DIR, "metrics.json"), "w") as f:
-        json.dump(metrics, f, indent=2)
-    with open(os.path.join(EVAL_DIR, "best_threshold.txt"), "w") as f:
-        f.write(str(best_thr))
+    # Lưu metrics
+    upload_bytes(json.dumps(metrics, indent=2).encode(),
+                 "preprocessed/metrics.json", bucket=S3_OUTPUT_BUCKET)
+    upload_bytes(str(best_thr).encode(),
+                 "preprocessed/best_threshold.txt", bucket=S3_OUTPUT_BUCKET)
 
-    # ── ROC Curve ────────────────────────────────────────────────────
+    # ROC Curve
     fpr, tpr, _ = roc_curve(y_test, prob_test)
-    plt.figure(figsize=(7, 6))
-    plt.plot(fpr, tpr, color="steelblue", lw=2,
-             label=f"ROC (AUC={metrics['auc']:.4f})")
-    plt.axhline(y=0.80, color="red", linestyle="--", label="TPR=0.80 (pAUC)")
-    plt.xlabel("False Positive Rate")
-    plt.ylabel("True Positive Rate")
-    plt.title("ROC Curve — ISIC 2024 Test Set")
-    plt.legend(loc="lower right")
-    plt.grid(alpha=0.3)
-    plt.tight_layout()
-    plt.savefig(os.path.join(EVAL_DIR, "roc_curve.png"), dpi=150)
+    fig, ax = plt.subplots(figsize=(7, 6))
+    ax.plot(fpr, tpr, lw=2, color="steelblue",
+            label=f"AUC={metrics['auc']:.4f}")
+    ax.axhline(0.80, color="red", linestyle="--", label="TPR=0.80 (pAUC)")
+    ax.set_xlabel("FPR"); ax.set_ylabel("TPR")
+    ax.set_title("ROC Curve — ISIC 2024 Test Set")
+    ax.legend(); ax.grid(alpha=0.3)
+    upload_bytes(fig_to_bytes(fig), "preprocessed/roc_curve.png",
+                 bucket=S3_OUTPUT_BUCKET)
     plt.close()
 
-    # ── Confusion Matrix ─────────────────────────────────────────────
-    cm = confusion_matrix(y_test, y_pred_test)
+    # Confusion Matrix
+    cm = confusion_matrix(y_test, y_pred)
     fig, ax = plt.subplots(figsize=(5, 4))
     im = ax.imshow(cm, cmap="Blues")
     plt.colorbar(im)
-    ax.set_xticks([0, 1]); ax.set_yticks([0, 1])
-    ax.set_xticklabels(["Benign", "Malignant"])
-    ax.set_yticklabels(["Benign", "Malignant"])
+    ax.set_xticks([0,1]); ax.set_yticks([0,1])
+    ax.set_xticklabels(["Benign","Malignant"])
+    ax.set_yticklabels(["Benign","Malignant"])
     ax.set_xlabel("Predicted"); ax.set_ylabel("Actual")
-    ax.set_title("Confusion Matrix — Test Set")
     for i in range(2):
         for j in range(2):
             ax.text(j, i, f"{cm[i,j]:,}", ha="center", va="center",
-                    color="white" if cm[i,j] > cm.max()/2 else "black",
-                    fontsize=14, fontweight="bold")
+                    fontsize=14, fontweight="bold",
+                    color="white" if cm[i,j] > cm.max()/2 else "black")
     plt.tight_layout()
-    plt.savefig(os.path.join(EVAL_DIR, "confusion_matrix.png"), dpi=150)
+    upload_bytes(fig_to_bytes(fig), "preprocessed/confusion_matrix.png",
+                 bucket=S3_OUTPUT_BUCKET)
     plt.close()
 
-    # ── Baseline Profile cho Drift Monitor ──────────────────────────
-    tab_val_df = df.iloc[idx_val][feature_cols].reset_index(drop=True)
+    # Baseline profile cho drift monitor
     baseline = {
         col: {
-            "mean":   float(tab_val_df[col].mean()),
-            "std":    float(tab_val_df[col].std()),
-            "p25":    float(tab_val_df[col].quantile(0.25)),
-            "p50":    float(tab_val_df[col].quantile(0.50)),
-            "p75":    float(tab_val_df[col].quantile(0.75)),
+            "mean": float(X_tab_val[:, i].mean()),
+            "std":  float(X_tab_val[:, i].std()),
+            "p25":  float(np.percentile(X_tab_val[:, i], 25)),
+            "p50":  float(np.percentile(X_tab_val[:, i], 50)),
+            "p75":  float(np.percentile(X_tab_val[:, i], 75)),
         }
-        for col in feature_cols
+        for i, col in enumerate(feature_cols)
     }
     baseline["_prediction_rate"] = float(prob_val.mean())
-    with open(os.path.join(EVAL_DIR, "baseline_profile.json"), "w") as f:
-        json.dump(baseline, f, indent=2)
+    upload_bytes(json.dumps(baseline, indent=2).encode(),
+                 "preprocessed/baseline_profile.json", bucket=S3_OUTPUT_BUCKET)
 
-    print(f"\nKết quả lưu vào {EVAL_DIR}")
-    print("Evaluate hoàn thành!")
+    print(f"\nTất cả kết quả → s3://{S3_OUTPUT_BUCKET}/preprocessed/")
+    print("\nBước 6 hoàn thành!")
 
 
 if __name__ == "__main__":

@@ -7,6 +7,7 @@ RUN pip install --no-cache-dir \
     h5py==3.11.0
 
 COPY Multimodal/models/build_efficientnetB3.py .
+COPY Multimodal/s3_utils.py .
 
 ENV PROCESSED_DIR=/data/processed
 ENV MODEL_DIR=/data/model

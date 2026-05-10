@@ -1,12 +1,13 @@
 """
-build_efficientnetB3.py — Bước 4a: Định nghĩa Image Branch (EfficientNetB3)
-Kiến trúc: EfficientNetB3(ImageNet) → GAP → BN → Dense(256) → Dropout(0.4)
-                                             → Dense(128) → Dropout(0.3)
-Đầu ra  : /data/model/efficientnetB3_branch.h5
-           /data/model/efficientnetB3_meta.json
+build_efficientnetB3.py — Bước 4a: Định nghĩa Image Branch
+
+Ghi:
+  s3://kltn-isic-2024-colab/preprocessed/efficientnetB3_architecture.json
+  s3://kltn-isic-2024-colab/preprocessed/efficientnetB3_meta.json
+  (weights không lưu — model được build lại khi train)
 """
-import os
 import json
+import os
 import numpy as np
 import tensorflow as tf
 from tensorflow.keras.applications import EfficientNetB3
@@ -16,14 +17,10 @@ from tensorflow.keras.layers import (
     GlobalAveragePooling2D, BatchNormalization,
 )
 
-PROCESSED_DIR = os.environ.get("PROCESSED_DIR", "/data/processed")
-MODEL_DIR     = os.environ.get("MODEL_DIR", "/data/model")
-IMAGE_SIZE    = int(os.environ.get("IMAGE_SIZE", "224"))
+from s3_utils import upload_bytes, S3_OUTPUT_BUCKET
 
-os.makedirs(MODEL_DIR, exist_ok=True)
-
+IMAGE_SIZE  = int(os.environ.get("IMAGE_SIZE", "224"))
 IMAGE_SHAPE = (IMAGE_SIZE, IMAGE_SIZE, 3)
-
 
 def focal_loss(gamma: float = 2.0, alpha: float = 0.25):
     """Focal Loss: FL(p) = -α(1-p)^γ log(p)"""
@@ -40,18 +37,17 @@ def focal_loss(gamma: float = 2.0, alpha: float = 0.25):
 
 def build_image_branch(image_shape=IMAGE_SHAPE):
     """
-    Image Branch: EfficientNetB3 pretrained ImageNet
-    Trả về (model_image_branch, backbone) để dùng lại ở bước train.
+    EfficientNetB3(ImageNet, frozen) → GAP → BN
+    → Dense(256,relu) → Dropout(0.4)
+    → Dense(128,relu) → Dropout(0.3)
+    Output dim: 128
     """
     image_input = Input(shape=image_shape, name="image_input")
-
     backbone = EfficientNetB3(
-        include_top=False,
-        weights="imagenet",
-        input_tensor=image_input,
-        pooling=None,
+        include_top=False, weights="imagenet",
+        input_tensor=image_input, pooling=None,
     )
-    backbone.trainable = False  # Phase 1: đóng băng
+    backbone.trainable = False
 
     x = backbone.output
     x = GlobalAveragePooling2D(name="gap")(x)
@@ -70,38 +66,34 @@ def main():
     print(f"Image shape: {IMAGE_SHAPE}")
 
     model, backbone = build_image_branch()
-
-    # Lưu weights khởi tạo
-    weights_path = os.path.join(MODEL_DIR, "efficientnetB3_branch.h5")
-    model.save_weights(weights_path)
-    print(f"Lưu weights → {weights_path}")
-
-    # Lưu architecture JSON
-    arch_path = os.path.join(MODEL_DIR, "efficientnetB3_architecture.json")
-    with open(arch_path, "w") as f:
-        f.write(model.to_json())
-    print(f"Lưu architecture → {arch_path}")
-
-    # Metadata
-    meta = {
-        "image_shape": list(IMAGE_SHAPE),
-        "backbone": "EfficientNetB3",
-        "backbone_layers": len(backbone.layers),
-        "fine_tune_from_layer": 300,
-        "conv_last_layer": "top_conv",
-        "output_dim": 128,
-        "total_params": model.count_params(),
-        "trainable_params_phase1": sum(
-            np.prod(v.shape) for v in model.trainable_weights
-        ),
-    }
-    meta_path = os.path.join(MODEL_DIR, "efficientnetB3_meta.json")
-    with open(meta_path, "w") as f:
-        json.dump(meta, f, indent=2)
-    print(f"Lưu metadata → {meta_path}")
-
     model.summary()
-    print("\nBuild EfficientNetB3 branch hoàn thành!")
+
+    # Lưu architecture JSON lên S3
+    arch_json = model.to_json()
+    upload_bytes(
+        arch_json.encode(),
+        "preprocessed/efficientnetB3_architecture.json",
+        bucket=S3_OUTPUT_BUCKET,
+    )
+
+    meta = {
+        "image_shape":         list(IMAGE_SHAPE),
+        "backbone":            "EfficientNetB3",
+        "backbone_layers":     len(backbone.layers),
+        "fine_tune_from_layer": 300,
+        "conv_last_layer":     "top_conv",
+        "output_dim":          128,
+        "total_params":        model.count_params(),
+    }
+    upload_bytes(
+        json.dumps(meta, indent=2).encode(),
+        "preprocessed/efficientnetB3_meta.json",
+        bucket=S3_OUTPUT_BUCKET,
+    )
+
+    print(f"\nLưu → s3://{S3_OUTPUT_BUCKET}/preprocessed/efficientnetB3_architecture.json")
+    print(f"Lưu → s3://{S3_OUTPUT_BUCKET}/preprocessed/efficientnetB3_meta.json")
+    print("\nBước 4a hoàn thành!")
 
 
 if __name__ == "__main__":

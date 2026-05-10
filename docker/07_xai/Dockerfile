@@ -17,6 +17,7 @@ RUN pip install --no-cache-dir \
     tqdm==4.66.4
 
 COPY Multimodal/utils/xai.py .
+COPY Multimodal/s3_utils.py .
 
 ENV PROCESSED_DIR=/data/processed
 ENV SPLITS_DIR=/data/splits

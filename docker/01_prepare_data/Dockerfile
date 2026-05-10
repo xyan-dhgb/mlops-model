@@ -8,6 +8,7 @@ RUN pip install --no-cache-dir \
     pandas==2.2.2
 
 COPY Multimodal/data/download_dataset.py .
+COPY Multimodal/s3_utils.py .
 
 # DATA_DIR and AWS/S3 settings are passed by the runtime environment.
 ENV DATA_DIR=/data/raw
