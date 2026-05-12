@@ -115,9 +115,10 @@ jobs:
     runs-on: ubuntu-latest
     needs: test
 
-    # Build each service image in parallel
+    # Build each service image - max 3 at once to avoid TLS connection saturation on ECR
     strategy:
       fail-fast: false
+      max-parallel: 3
       matrix:
         include:
           # 01 - Data preparation
@@ -258,10 +259,33 @@ jobs:
       - name: "Push to ECR - ${{ matrix.service }}"
         run: |
           TAG="${{ steps.tags.outputs.tag }}"
+          PUSHED=false
           for i in 1 2 3; do
             echo "Pushing ${TAG} (attempt ${i}/3)..."
-            docker push "${TAG}" && break || { echo "Retrying in 15s..."; sleep 15; }
+            if docker push "${TAG}"; then
+              PUSHED=true
+              break
+            fi
+            echo "Push failed, retrying in 15s..."
+            sleep 15
           done
+          if [ "${PUSHED}" != "true" ]; then
+            echo "ERROR: All 3 push attempts failed for ${TAG}"
+            exit 1
+          fi
+
+      # ── Verify tag exists in ECR ──────────────────────────────────────
+      - name: "Verify image in ECR - ${{ matrix.service }}"
+        run: |
+          TAG_ONLY="$(echo '${{ steps.tags.outputs.tag }}' | cut -d: -f2)"
+          echo "Verifying tag '${TAG_ONLY}' exists in ECR..."
+          aws ecr describe-images \
+            --repository-name ${{ env.ECR_REPOSITORY }} \
+            --region ${{ env.AWS_REGION }} \
+            --image-ids imageTag="${TAG_ONLY}" \
+            --query 'imageDetails[0].imageTags' \
+            --output text
+          echo "✅ Image confirmed in ECR: ${{ steps.tags.outputs.tag }}"
 
       # ── Annotate run summary ──────────────────────────────────────────────
       - name: "Summary"
