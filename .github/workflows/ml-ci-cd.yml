@@ -123,52 +123,52 @@ jobs:
           # 01 - Data preparation
           - service: prepare-data
             dockerfile: docker/01_prepare_data/Dockerfile
-            context: docker/01_prepare_data
+            context: .
 
           # 02 - Preprocessing (CSV metadata)
           - service: preprocess-csv
             dockerfile: docker/02_preprocess/csv/Dockerfile
-            context: docker/02_preprocess/csv
+            context: .
 
           # 02 - Preprocessing (Image)
           - service: preprocess-image
             dockerfile: docker/02_preprocess/image/Dockerfile
-            context: docker/02_preprocess/image
+            context: .
 
           # 03 - Dataloader
           - service: dataloader
             dockerfile: docker/03_dataloader/Dockerfile
-            context: docker/03_dataloader
+            context: .
 
           # 04 - Model build (EfficientNetB3)
           - service: build-model-efficientnetb3
             dockerfile: docker/04_build_model/efficientnetB3/Dockerfile
-            context: docker/04_build_model/efficientnetB3
+            context: .
 
           # 04 - Model build (MLP)
           - service: build-model-mlp
             dockerfile: docker/04_build_model/mlp/Dockerfile
-            context: docker/04_build_model/mlp
+            context: .
 
           # 05 - Training
           - service: train
             dockerfile: docker/05_train/Dockerfile
-            context: docker/05_train
+            context: .
 
           # 06 - Evaluation
           - service: evaluate
             dockerfile: docker/06_evaluate/Dockerfile
-            context: docker/06_evaluate
+            context: .
 
           # 07 - Explainability (XAI)
           - service: xai
             dockerfile: docker/07_xai/Dockerfile
-            context: docker/07_xai
+            context: .
 
           # Drift Monitor
           - service: drift-monitor
             dockerfile: docker/drift_monitor/Dockerfile
-            context: docker/drift_monitor
+            context: .
 
     steps:
       - name: "Checkout source"
