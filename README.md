@@ -47,8 +47,7 @@ isic2024-mlops/
 │   ├── Dockerfile.training       # Stage 2: Two-phase GPU training
 │   ├── Dockerfile.serving        # Stage 3: FastAPI inference API
 │   └── mlflow/
-│       ├── docker-compose.yml    # Full local stack
-│       └── k8s-mlflow.yaml       # Kubernetes manifests
+│       └── docker-compose.yml    # Full local stack
 ├── MLflow_signature/
 │   └── train.py                  # MLflow-tracked training entry-point
 ├── scripts/
@@ -145,7 +144,7 @@ push → lint (flake8/mypy)
      → integration smoke-test
      → docker build (preprocessing / training / serving)
      → push to GHCR  [main only]
-     → rolling update K8s serving deployment  [main only]
+     → hand off image tag to the deployment repository  [main only]
 ```
 
 ---
