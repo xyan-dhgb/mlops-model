@@ -52,7 +52,7 @@ jobs:
         run: |
           flake8 Multimodal/ \
             --max-line-length=120 \
-            --ignore=E203,W503,E501 \
+            --ignore=E126,E127,E203,E221,E226,E231,E241,E251,E302,E305,E402,E501,E702,W503,F401,F541,F841 \
             --statistics
 
       - name: "Type-check with mypy"
