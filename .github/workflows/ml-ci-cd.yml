@@ -1,8 +1,9 @@
 #  Trigger : push -> main  |  workflow_dispatch (manual)
 #
-#  Stage 1 - BUILD   : lint + type-check (Multimodal/)
-#  Stage 2 - TEST    : unit tests + integration smoke (Multimodal/)
-#  Stage 3 - PACKAGE : build Docker (docker/) -> Trivy scan -> push ECR
+#  Stage 1 - BUILD      : lint + type-check (Multimodal/)
+#  Stage 2 - TEST       : unit tests + integration smoke (Multimodal/)
+#  Stage 3 - SETUP-ECR  : get registry URL, ensure ECR repo exists  (runs once)
+#  Stage 4 - PACKAGE    : build Docker (docker/) -> Trivy scan -> push ECR
 
 name: "KLTN Multimodal - Packaging Pipeline"
 
@@ -19,7 +20,6 @@ on:
 # ── Shared env vars ───────────────────────────────────────────────────────────
 env:
   AWS_REGION: ap-southeast-1
-  ECR_REGISTRY: ${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.ap-southeast-1.amazonaws.com
   ECR_REPOSITORY: kltn-mutimodal-images
   PYTHON_VERSION: "3.11"
 
@@ -108,14 +108,56 @@ jobs:
           path: test-results/
 
   # =============================================================================
-  # STAGE 3 - PACKAGE  (Docker build -> Trivy scan -> ECR push)
+  # STAGE 3 - SETUP-ECR  (runs ONCE before the matrix)
+  #   - Derives ECR registry URL from AWS CLI (no AWS_ACCOUNT_ID secret needed)
+  #   - Ensures ECR repository exists
+  #   - Passes registry URL to the package matrix via job output
   # =============================================================================
-  package:
-    name: "Package - Build, Scan and Push to ECR"
+  setup-ecr:
+    name: "Setup ECR"
     runs-on: ubuntu-latest
     needs: test
 
-    # Build each service image - max 3 at once to avoid TLS connection saturation on ECR
+    outputs:
+      registry: ${{ steps.get-registry.outputs.registry }}
+
+    steps:
+      - name: "Configure AWS credentials"
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: "Get ECR registry URL & ensure repo exists"
+        id: get-registry
+        run: |
+          # Derive registry URL from the caller identity — no secret needed
+          ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text)
+          REGISTRY="${ACCOUNT_ID}.dkr.ecr.${{ env.AWS_REGION }}.amazonaws.com"
+          echo "registry=${REGISTRY}" >> $GITHUB_OUTPUT
+          echo "✅ Registry: ${REGISTRY}"
+
+          # Ensure the ECR repo exists (only needs to happen once)
+          aws ecr describe-repositories \
+            --repository-names ${{ env.ECR_REPOSITORY }} \
+            --region ${{ env.AWS_REGION }} > /dev/null 2>&1 || \
+          aws ecr create-repository \
+            --repository-name ${{ env.ECR_REPOSITORY }} \
+            --region ${{ env.AWS_REGION }} \
+            --image-scanning-configuration scanOnPush=false \
+            --encryption-configuration encryptionType=AES256
+          echo "✅ Repository ${{ env.ECR_REPOSITORY }} is ready."
+
+  # =============================================================================
+  # STAGE 4 - PACKAGE  (Docker build -> Trivy scan -> ECR push)
+  # =============================================================================
+  package:
+    name: "Package - ${{ matrix.service }}"
+    runs-on: ubuntu-latest
+    needs: [test, setup-ecr]
+
+    # Build each service image - max 3 at once to avoid ECR connection saturation
     strategy:
       fail-fast: false
       max-parallel: 3
@@ -175,9 +217,7 @@ jobs:
       - name: "Checkout source"
         uses: actions/checkout@v4
 
-
-      # ── AWS credentials & ECR login ───────────────────────────────────────
-      # Login first so ecr-login outputs the real registry URL (no need for AWS_ACCOUNT_ID secret)
+      # ── AWS credentials ────────────────────────────────────────────────────
       - name: "Configure AWS credentials"
         uses: aws-actions/configure-aws-credentials@v4
         with:
@@ -185,52 +225,28 @@ jobs:
           aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
           aws-region: ${{ env.AWS_REGION }}
 
-      - name: "Login to Amazon ECR (private)"
-        id: ecr-login
+      # ── Login to ECR (registry URL already resolved by setup-ecr job) ─────
+      - name: "Login to Amazon ECR"
         run: |
-          REGISTRY="${{ env.ECR_REGISTRY }}"
-          for i in 1 2 3; do
-            echo "ECR login attempt ${i}/3..."
-            if aws ecr get-login-password --region ${{ env.AWS_REGION }} | \
-               docker login --username AWS --password-stdin "${REGISTRY}"; then
-              echo "registry=${REGISTRY}" >> $GITHUB_OUTPUT
-              echo "✅ Logged in to ${REGISTRY}"
-              break
-            fi
-            [ $i -lt 3 ] && echo "Login failed, retrying in 20s..." && sleep 20 || \
-              { echo "ERROR: ECR login failed after 3 attempts"; exit 1; }
-          done
+          REGISTRY="${{ needs.setup-ecr.outputs.registry }}"
+          echo "Logging in to ${REGISTRY}..."
+          aws ecr get-login-password --region ${{ env.AWS_REGION }} | \
+            docker login --username AWS --password-stdin "${REGISTRY}"
+          echo "✅ Logged in to ${REGISTRY}"
 
-      # Private ECR repos are NOT created automatically - ensure it exists
-      - name: "Ensure ECR repository exists"
-        run: |
-          aws ecr describe-repositories \
-            --repository-names ${{ env.ECR_REPOSITORY }} \
-            --region ${{ env.AWS_REGION }} > /dev/null 2>&1 || \
-          aws ecr create-repository \
-            --repository-name ${{ env.ECR_REPOSITORY }} \
-            --region ${{ env.AWS_REGION }} \
-            --image-scanning-configuration scanOnPush=false \
-            --encryption-configuration encryptionType=AES256
-          echo "Repository ${{ env.ECR_REPOSITORY }} is ready."
-
-      # ── Compute image tag (timestamp: YYYYMMDD-HHMM) ─────────────────────
+      # ── Compute image tag (timestamp: YYYYMMDD-HHMM) ──────────────────────
       - name: "Compute image tag"
         id: tags
         run: |
-          SERVICE="${{ matrix.service }}"
-          REPO="${{ steps.ecr-login.outputs.registry }}/${{ env.ECR_REPOSITORY }}"
+          REGISTRY="${{ needs.setup-ecr.outputs.registry }}"
           TIMESTAMP="$(date +'%Y%m%d-%H%M')"
-
-          # Single tag: <service>-YYYYMMDD-HHMM
-          echo "tag=${REPO}:${SERVICE}-${TIMESTAMP}" >> $GITHUB_OUTPUT
+          echo "tag=${REGISTRY}/${{ env.ECR_REPOSITORY }}:${{ matrix.service }}-${TIMESTAMP}" >> $GITHUB_OUTPUT
 
       # ── Docker Buildx setup ───────────────────────────────────────────────
       - name: "Set up Docker Buildx"
         uses: docker/setup-buildx-action@v3
 
-
-      # ── Build & push image directly to ECR ─────────────────────────────
+      # ── Build & push image directly to ECR ────────────────────────────────
       - name: "Build & Push - ${{ matrix.service }}"
         uses: docker/build-push-action@v6
         with:
@@ -241,7 +257,7 @@ jobs:
           cache-from: type=gha,scope=${{ matrix.service }}
           cache-to: type=gha,mode=max,scope=${{ matrix.service }}
 
-      # ── Trivy security scan (from ECR after push) ───────────────────────
+      # ── Trivy security scan (from ECR after push) ─────────────────────────
       - name: "Trivy - Scan image (${{ matrix.service }})"
         uses: aquasecurity/trivy-action@master
         with:
@@ -260,7 +276,6 @@ jobs:
         with:
           name: trivy-report-${{ matrix.service }}
           path: trivy-${{ matrix.service }}.txt
-
 
       # ── Annotate run summary ──────────────────────────────────────────────
       - name: "Summary"
