@@ -255,6 +255,8 @@ jobs:
           push: true
           tags: ${{ steps.tags.outputs.tag }}
           platforms: linux/amd64
+          provenance: false # disable SLSA attestation → plain Image, not Image Index
+          sbom: false # disable SBOM attestation for same reason
           cache-from: type=gha,scope=${{ matrix.service }}
           cache-to: type=gha,mode=max,scope=${{ matrix.service }}
 
