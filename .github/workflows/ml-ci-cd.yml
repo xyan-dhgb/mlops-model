@@ -187,12 +187,19 @@ jobs:
 
       - name: "Login to Amazon ECR (private)"
         id: ecr-login
-        uses: aws-actions/amazon-ecr-login@v2
-        with:
-          registry-type: private
-          mask-password: true
-        # outputs: steps.ecr-login.outputs.registry
-        #   e.g. 123456789012.dkr.ecr.ap-southeast-1.amazonaws.com
+        run: |
+          REGISTRY="${{ env.ECR_REGISTRY }}"
+          for i in 1 2 3; do
+            echo "ECR login attempt ${i}/3..."
+            if aws ecr get-login-password --region ${{ env.AWS_REGION }} | \
+               docker login --username AWS --password-stdin "${REGISTRY}"; then
+              echo "registry=${REGISTRY}" >> $GITHUB_OUTPUT
+              echo "✅ Logged in to ${REGISTRY}"
+              break
+            fi
+            [ $i -lt 3 ] && echo "Login failed, retrying in 20s..." && sleep 20 || \
+              { echo "ERROR: ECR login failed after 3 attempts"; exit 1; }
+          done
 
       # Private ECR repos are NOT created automatically - ensure it exists
       - name: "Ensure ECR repository exists"
@@ -223,30 +230,29 @@ jobs:
         uses: docker/setup-buildx-action@v3
 
 
-      # ── Build image ───────────────────────────────────────────────────────
-      - name: "Build Docker image - ${{ matrix.service }}"
+      # ── Build & push image directly to ECR ─────────────────────────────
+      - name: "Build & Push - ${{ matrix.service }}"
         uses: docker/build-push-action@v6
         with:
           context: ${{ matrix.context }}
           file: ${{ matrix.dockerfile }}
-          push: false
-          load: true
+          push: true
           tags: ${{ steps.tags.outputs.tag }}
           cache-from: type=gha,scope=${{ matrix.service }}
           cache-to: type=gha,mode=max,scope=${{ matrix.service }}
 
-      # ── Trivy security scan ───────────────────────────────────────────────
+      # ── Trivy security scan (from ECR after push) ───────────────────────
       - name: "Trivy - Scan image (${{ matrix.service }})"
         uses: aquasecurity/trivy-action@master
         with:
-          image-ref: ${{ steps.tags.outputs.tag_latest }}
+          image-ref: ${{ steps.tags.outputs.tag }}
           format: table
           exit-code: "1"
           severity: "CRITICAL,HIGH"
           ignore-unfixed: true
           vuln-type: "os,library"
           output: trivy-${{ matrix.service }}.txt
-        continue-on-error: true # report only - do not block push
+        continue-on-error: true # report only - do not block
 
       - name: "Upload Trivy report - ${{ matrix.service }}"
         uses: actions/upload-artifact@v4
@@ -255,37 +261,6 @@ jobs:
           name: trivy-report-${{ matrix.service }}
           path: trivy-${{ matrix.service }}.txt
 
-      # ── Push to ECR ───────────────────────────────────────────────────────
-      - name: "Push to ECR - ${{ matrix.service }}"
-        run: |
-          TAG="${{ steps.tags.outputs.tag }}"
-          PUSHED=false
-          for i in 1 2 3; do
-            echo "Pushing ${TAG} (attempt ${i}/3)..."
-            if docker push "${TAG}"; then
-              PUSHED=true
-              break
-            fi
-            echo "Push failed, retrying in 15s..."
-            sleep 15
-          done
-          if [ "${PUSHED}" != "true" ]; then
-            echo "ERROR: All 3 push attempts failed for ${TAG}"
-            exit 1
-          fi
-
-      # ── Verify tag exists in ECR ──────────────────────────────────────
-      - name: "Verify image in ECR - ${{ matrix.service }}"
-        run: |
-          TAG_ONLY="$(echo '${{ steps.tags.outputs.tag }}' | cut -d: -f2)"
-          echo "Verifying tag '${TAG_ONLY}' exists in ECR..."
-          aws ecr describe-images \
-            --repository-name ${{ env.ECR_REPOSITORY }} \
-            --region ${{ env.AWS_REGION }} \
-            --image-ids imageTag="${TAG_ONLY}" \
-            --query 'imageDetails[0].imageTags' \
-            --output text
-          echo "✅ Image confirmed in ECR: ${{ steps.tags.outputs.tag }}"
 
       # ── Annotate run summary ──────────────────────────────────────────────
       - name: "Summary"
