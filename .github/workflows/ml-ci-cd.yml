@@ -272,9 +272,21 @@ jobs:
       # ── Push to ECR ───────────────────────────────────────────────────────
       - name: "Push to ECR - ${{ matrix.service }}"
         run: |
-          docker push ${{ steps.tags.outputs.tag_latest }}
-          docker push ${{ steps.tags.outputs.tag_sha }}
-          docker push ${{ steps.tags.outputs.tag_branch }}
+          push_with_retry() {
+            local tag=$1
+            local max=3
+            for i in $(seq 1 $max); do
+              echo "Pushing ${tag} (attempt ${i}/${max})..."
+              docker push "${tag}" && return 0
+              echo "Push failed, retrying in 15s..."
+              sleep 15
+            done
+            echo "ERROR: Failed to push ${tag} after ${max} attempts"
+            return 1
+          }
+          push_with_retry "${{ steps.tags.outputs.tag_latest }}"
+          push_with_retry "${{ steps.tags.outputs.tag_sha }}"
+          push_with_retry "${{ steps.tags.outputs.tag_branch }}"
 
       # ── Annotate run summary ──────────────────────────────────────────────
       - name: "Summary"

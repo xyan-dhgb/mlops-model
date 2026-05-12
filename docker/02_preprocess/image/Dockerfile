@@ -1,14 +1,16 @@
 FROM python:3.10-slim
 
-# Cài OpenCV cần libGL
-RUN apt-get update && apt-get install -y --no-install-recommends \
-    libgl1-mesa-glx \
-    libglib2.0-0 \
-    && rm -rf /var/lib/apt/lists/*
+# libglib2.0-0 needed by OpenCV headless; retry loop handles transient apt network errors
+RUN for i in 1 2 3; do \
+        apt-get update && \
+        apt-get install -y --no-install-recommends libglib2.0-0 && \
+        rm -rf /var/lib/apt/lists/* && break || \
+        { echo "apt attempt $i failed, retrying in 10s..."; sleep 10; }; \
+    done
 
 WORKDIR /app
 
-RUN pip install --no-cache-dir \
+RUN pip install --no-cache-dir --retries 5 --timeout 60 \
     numpy==1.26.4 \
     opencv-python-headless==4.10.0.84 \
     h5py==3.11.0 \
