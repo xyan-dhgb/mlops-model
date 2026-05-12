@@ -195,6 +195,7 @@ jobs:
           echo "date=${DATE}"                                     >> $GITHUB_OUTPUT
 
       # ── AWS credentials & ECR login ───────────────────────────────────────
+      # Login first so ecr-login outputs the real registry URL (no need for AWS_ACCOUNT_ID secret)
       - name: "Configure AWS credentials"
         uses: aws-actions/configure-aws-credentials@v4
         with:
@@ -208,6 +209,8 @@ jobs:
         with:
           registry-type: private
           mask-password: true
+        # outputs: steps.ecr-login.outputs.registry
+        #   e.g. 123456789012.dkr.ecr.ap-southeast-1.amazonaws.com
 
       # Private ECR repos are NOT created automatically - ensure it exists
       - name: "Ensure ECR repository exists"
@@ -222,9 +225,30 @@ jobs:
             --encryption-configuration encryptionType=AES256
           echo "Repository ${{ env.ECR_REPOSITORY }} is ready."
 
+      # ── Compute image tags (after ECR login so registry URL is available) ─
+      - name: "Compute image tags"
+        id: tags
+        run: |
+          SHORT_SHA="${GITHUB_SHA::8}"
+          DATE="$(date +'%Y%m%d')"
+          SERVICE="${{ matrix.service }}"
+          REPO="${{ steps.ecr-login.outputs.registry }}/${{ env.ECR_REPOSITORY }}"
+
+          # Tag scheme:
+          #   latest-<service>             -> always points to the newest build
+          #   <service>-<YYYYMMDD>-<sha8> -> immutable, traceable to commit + date
+          #   <service>-main               -> tracks the main branch
+
+          echo "tag_latest=${REPO}:latest-${SERVICE}"            >> $GITHUB_OUTPUT
+          echo "tag_sha=${REPO}:${SERVICE}-${DATE}-${SHORT_SHA}" >> $GITHUB_OUTPUT
+          echo "tag_branch=${REPO}:${SERVICE}-main"              >> $GITHUB_OUTPUT
+          echo "short_sha=${SHORT_SHA}"                          >> $GITHUB_OUTPUT
+          echo "date=${DATE}"                                     >> $GITHUB_OUTPUT
+
       # ── Docker Buildx setup ───────────────────────────────────────────────
       - name: "Set up Docker Buildx"
         uses: docker/setup-buildx-action@v3
+
 
       # ── Build image ───────────────────────────────────────────────────────
       - name: "Build Docker image - ${{ matrix.service }}"
