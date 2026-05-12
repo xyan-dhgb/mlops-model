@@ -174,25 +174,6 @@ jobs:
       - name: "Checkout source"
         uses: actions/checkout@v4
 
-      # ── Compute image tags ────────────────────────────────────────────────
-      - name: "Compute image tags"
-        id: tags
-        run: |
-          SHORT_SHA="${GITHUB_SHA::8}"
-          DATE="$(date +'%Y%m%d')"
-          SERVICE="${{ matrix.service }}"
-          REPO="${{ env.ECR_REGISTRY }}/${{ env.ECR_REPOSITORY }}"
-
-          # Tag scheme:
-          #   latest-<service>             -> always points to the newest build
-          #   <service>-<YYYYMMDD>-<sha8> -> immutable, traceable to commit + date
-          #   <service>-main               -> tracks the main branch
-
-          echo "tag_latest=${REPO}:latest-${SERVICE}"            >> $GITHUB_OUTPUT
-          echo "tag_sha=${REPO}:${SERVICE}-${DATE}-${SHORT_SHA}" >> $GITHUB_OUTPUT
-          echo "tag_branch=${REPO}:${SERVICE}-main"              >> $GITHUB_OUTPUT
-          echo "short_sha=${SHORT_SHA}"                          >> $GITHUB_OUTPUT
-          echo "date=${DATE}"                                     >> $GITHUB_OUTPUT
 
       # ── AWS credentials & ECR login ───────────────────────────────────────
       # Login first so ecr-login outputs the real registry URL (no need for AWS_ACCOUNT_ID secret)
