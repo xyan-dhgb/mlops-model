@@ -206,25 +206,16 @@ jobs:
             --encryption-configuration encryptionType=AES256
           echo "Repository ${{ env.ECR_REPOSITORY }} is ready."
 
-      # ── Compute image tags (after ECR login so registry URL is available) ─
-      - name: "Compute image tags"
+      # ── Compute image tag (timestamp: YYYYMMDD-HHMM) ─────────────────────
+      - name: "Compute image tag"
         id: tags
         run: |
-          SHORT_SHA="${GITHUB_SHA::8}"
-          DATE="$(date +'%Y%m%d')"
           SERVICE="${{ matrix.service }}"
           REPO="${{ steps.ecr-login.outputs.registry }}/${{ env.ECR_REPOSITORY }}"
+          TIMESTAMP="$(date +'%Y%m%d-%H%M')"
 
-          # Tag scheme:
-          #   latest-<service>             -> always points to the newest build
-          #   <service>-<YYYYMMDD>-<sha8> -> immutable, traceable to commit + date
-          #   <service>-main               -> tracks the main branch
-
-          echo "tag_latest=${REPO}:latest-${SERVICE}"            >> $GITHUB_OUTPUT
-          echo "tag_sha=${REPO}:${SERVICE}-${DATE}-${SHORT_SHA}" >> $GITHUB_OUTPUT
-          echo "tag_branch=${REPO}:${SERVICE}-main"              >> $GITHUB_OUTPUT
-          echo "short_sha=${SHORT_SHA}"                          >> $GITHUB_OUTPUT
-          echo "date=${DATE}"                                     >> $GITHUB_OUTPUT
+          # Single tag: <service>-YYYYMMDD-HHMM
+          echo "tag=${REPO}:${SERVICE}-${TIMESTAMP}" >> $GITHUB_OUTPUT
 
       # ── Docker Buildx setup ───────────────────────────────────────────────
       - name: "Set up Docker Buildx"
@@ -239,15 +230,9 @@ jobs:
           file: ${{ matrix.dockerfile }}
           push: false
           load: true
-          tags: |
-            ${{ steps.tags.outputs.tag_latest }}
-            ${{ steps.tags.outputs.tag_sha }}
-            ${{ steps.tags.outputs.tag_branch }}
+          tags: ${{ steps.tags.outputs.tag }}
           cache-from: type=gha,scope=${{ matrix.service }}
           cache-to: type=gha,mode=max,scope=${{ matrix.service }}
-          build-args: |
-            BUILD_DATE=${{ steps.tags.outputs.date }}
-            GIT_COMMIT=${{ steps.tags.outputs.short_sha }}
 
       # ── Trivy security scan ───────────────────────────────────────────────
       - name: "Trivy - Scan image (${{ matrix.service }})"
@@ -272,29 +257,17 @@ jobs:
       # ── Push to ECR ───────────────────────────────────────────────────────
       - name: "Push to ECR - ${{ matrix.service }}"
         run: |
-          push_with_retry() {
-            local tag=$1
-            local max=3
-            for i in $(seq 1 $max); do
-              echo "Pushing ${tag} (attempt ${i}/${max})..."
-              docker push "${tag}" && return 0
-              echo "Push failed, retrying in 15s..."
-              sleep 15
-            done
-            echo "ERROR: Failed to push ${tag} after ${max} attempts"
-            return 1
-          }
-          push_with_retry "${{ steps.tags.outputs.tag_latest }}"
-          push_with_retry "${{ steps.tags.outputs.tag_sha }}"
-          push_with_retry "${{ steps.tags.outputs.tag_branch }}"
+          TAG="${{ steps.tags.outputs.tag }}"
+          for i in 1 2 3; do
+            echo "Pushing ${TAG} (attempt ${i}/3)..."
+            docker push "${TAG}" && break || { echo "Retrying in 15s..."; sleep 15; }
+          done
 
       # ── Annotate run summary ──────────────────────────────────────────────
       - name: "Summary"
         if: always()
         run: |
           echo "## ${{ matrix.service }}" >> $GITHUB_STEP_SUMMARY
-          echo "| Tag | Value |" >> $GITHUB_STEP_SUMMARY
-          echo "|-----|-------|" >> $GITHUB_STEP_SUMMARY
-          echo "| latest | \`${{ steps.tags.outputs.tag_latest }}\` |" >> $GITHUB_STEP_SUMMARY
-          echo "| immutable | \`${{ steps.tags.outputs.tag_sha }}\` |" >> $GITHUB_STEP_SUMMARY
-          echo "| branch | \`${{ steps.tags.outputs.tag_branch }}\` |" >> $GITHUB_STEP_SUMMARY
+          echo "| Tag |" >> $GITHUB_STEP_SUMMARY
+          echo "|-----|" >> $GITHUB_STEP_SUMMARY
+          echo "| \`${{ steps.tags.outputs.tag }}\` |" >> $GITHUB_STEP_SUMMARY
