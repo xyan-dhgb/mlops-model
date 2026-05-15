@@ -8,6 +8,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && rm -rf /var/lib/apt/lists/*
 
 RUN pip install --no-cache-dir \
+    boto3==1.34.131 \
     numpy==1.26.4 \
     pandas==2.2.2 \
     scikit-learn==1.5.0 \

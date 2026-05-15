@@ -11,6 +11,7 @@ RUN for i in 1 2 3; do \
 WORKDIR /app
 
 RUN pip install --no-cache-dir --retries 5 --timeout 60 \
+    boto3==1.34.131 \
     numpy==1.26.4 \
     opencv-python-headless==4.10.0.84 \
     h5py==3.11.0 \
