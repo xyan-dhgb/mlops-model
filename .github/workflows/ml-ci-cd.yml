@@ -240,7 +240,9 @@ jobs:
         run: |
           REGISTRY="${{ needs.setup-ecr.outputs.registry }}"
           TIMESTAMP="$(date +'%Y%m%d-%H%M')"
-          echo "tag=${REGISTRY}/${{ env.ECR_REPOSITORY }}:${{ matrix.service }}-${TIMESTAMP}" >> $GITHUB_OUTPUT
+          SHORT_TAG="${{ matrix.service }}-${TIMESTAMP}"
+          echo "tag=${REGISTRY}/${{ env.ECR_REPOSITORY }}:${SHORT_TAG}" >> $GITHUB_OUTPUT
+          echo "short_tag=${SHORT_TAG}" >> $GITHUB_OUTPUT
 
       # ── Docker Buildx setup ───────────────────────────────────────────────
       - name: "Set up Docker Buildx"
@@ -288,3 +290,100 @@ jobs:
           echo "| Tag |" >> $GITHUB_STEP_SUMMARY
           echo "|-----|" >> $GITHUB_STEP_SUMMARY
           echo "| \`${{ steps.tags.outputs.tag }}\` |" >> $GITHUB_STEP_SUMMARY
+
+      # ── Save short tag as artifact for update-gitops job ─────────────────
+      - name: "Save image tag artifact"
+        if: success()
+        run: echo "${{ steps.tags.outputs.short_tag }}" > "${{ matrix.service }}.txt"
+
+      - name: "Upload image tag artifact"
+        if: success()
+        uses: actions/upload-artifact@v4
+        with:
+          name: image-tag-${{ matrix.service }}
+          path: ${{ matrix.service }}.txt
+
+  # =============================================================================
+  # STAGE 5 - UPDATE-GITOPS  (commit new image tags to mlops-infr/values.yaml)
+  # =============================================================================
+  update-gitops:
+    name: "Update GitOps - values.yaml"
+    runs-on: ubuntu-latest
+    needs: package
+    if: success()
+
+    steps:
+      - name: "Checkout mlops-infr repo"
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ vars.GITOPS_REPO }}   # e.g. xyan-dhgb/mlops-infrastructure
+          token: ${{ secrets.GITOPS_PAT }}
+          path: mlops-infr
+
+      - name: "Download all image tag artifacts"
+        uses: actions/download-artifact@v4
+        with:
+          pattern: image-tag-*
+          path: image-tags/
+          merge-multiple: true
+
+      - name: "Update values.yaml with new image tags"
+        run: |
+          python3 << 'EOF'
+          import re, os, sys
+
+          VALUES_PATH = 'mlops-infr/gitops/mlops-pipeline/isic/values.yaml'
+
+          # service name (ECR tag prefix) → Helm values.yaml key
+          KEY_MAP = {
+              'prepare-data':               'prepareData',
+              'preprocess-csv':             'preprocessCsv',
+              'preprocess-image':           'preprocessImage',
+              'dataloader':                 'dataloader',
+              'build-model-efficientnetb3': 'buildEfficientnetb3',
+              'build-model-mlp':            'buildMlp',
+              'train':                      'train',
+              'evaluate':                   'evaluate',
+              'xai':                        'xai',
+              'drift-monitor':              'driftMonitor',
+          }
+
+          with open(VALUES_PATH, 'r') as f:
+              content = f.read()
+
+          for service, yaml_key in KEY_MAP.items():
+              tag_file = f'image-tags/{service}.txt'
+              if not os.path.exists(tag_file):
+                  print(f'⚠️  Missing tag file for {service} — skipping')
+                  continue
+              with open(tag_file) as tf:
+                  tag = tf.read().strip()
+              content, n = re.subn(
+                  rf'({re.escape(yaml_key)}:\s+)"[^"]*"',
+                  rf'\1"{tag}"',
+                  content
+              )
+              if n:
+                  print(f'✅  {yaml_key}: {tag}')
+              else:
+                  print(f'⚠️  Key not found in values.yaml: {yaml_key}', file=sys.stderr)
+
+          with open(VALUES_PATH, 'w') as f:
+              f.write(content)
+
+          print('\n✅ values.yaml updated.')
+          EOF
+
+      - name: "Commit and push to mlops-infr"
+        run: |
+          cd mlops-infr
+          git config user.name  "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          if git diff --quiet; then
+            echo "ℹ️  No changes to values.yaml — nothing to commit."
+            exit 0
+          fi
+          git add gitops/mlops-pipeline/isic/values.yaml
+          git commit -m "chore(gitops): update ISIC image tags $(date +'%Y%m%d-%H%M') [skip ci]"
+          git push
+          echo "✅ values.yaml committed and pushed."
