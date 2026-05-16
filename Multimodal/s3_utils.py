@@ -94,14 +94,20 @@ def list_s3_keys(prefix: str, bucket: str = S3_OUTPUT_BUCKET) -> list[str]:
 
 # ── NumPy helpers ────────────────────────────────────────────────────────
 def save_npy(array: np.ndarray, s3_key: str, bucket: str = S3_OUTPUT_BUCKET):
-    buf = io.BytesIO()
-    np.save(buf, array)
-    upload_bytes(buf.getvalue(), s3_key, bucket)
+    import tempfile
+    with tempfile.NamedTemporaryFile(suffix=".npy", delete=False) as tmp:
+        np.save(tmp.name, array)
+        upload_file(tmp.name, s3_key, bucket)
+    os.unlink(tmp.name)
 
 
 def load_npy(s3_key: str, bucket: str = S3_OUTPUT_BUCKET) -> np.ndarray:
-    data = download_bytes(s3_key, bucket)
-    return np.load(io.BytesIO(data), allow_pickle=False)
+    import tempfile
+    with tempfile.NamedTemporaryFile(suffix=".npy", delete=False) as tmp:
+        download_file(s3_key, tmp.name, bucket)
+        array = np.load(tmp.name, allow_pickle=False)
+    os.unlink(tmp.name)
+    return array
 
 
 # ── Pickle helpers ───────────────────────────────────────────────────────
