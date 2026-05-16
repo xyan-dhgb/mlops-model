@@ -13,6 +13,7 @@ WORKDIR /app
 RUN pip install --no-cache-dir --retries 5 --timeout 60 \
     boto3==1.34.131 \
     numpy==1.26.4 \
+    pandas==2.2.2 \
     opencv-python-headless==4.10.0.84 \
     h5py==3.11.0 \
     Pillow==10.3.0 \
