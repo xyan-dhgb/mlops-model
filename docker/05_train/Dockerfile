@@ -1,4 +1,4 @@
-FROM tensorflow/tensorflow:2.16.1-gpu
+FROM python:3.11-slim
 
 WORKDIR /app
 
@@ -8,6 +8,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && rm -rf /var/lib/apt/lists/*
 
 RUN pip install --no-cache-dir \
+    tensorflow==2.16.1 \
     boto3==1.34.131 \
     numpy==1.26.4 \
     pandas==2.2.2 \
