@@ -33,7 +33,7 @@ from sklearn.model_selection import train_test_split
 from s3_utils import (
     load_csv, load_pkl, download_bytes,
     save_npy, upload_bytes,
-    list_s3_keys,
+    list_s3_keys, s3_key_exists,
     S3_OUTPUT_BUCKET,
 )
 
@@ -57,6 +57,11 @@ def main():
     print("BƯỚC 3: Tạo features array + splits → S3")
     print(f"  Bucket: s3://{S3_OUTPUT_BUCKET}/")
     print("=" * 60)
+
+    if s3_key_exists("splits/split_info.json", bucket=S3_OUTPUT_BUCKET):
+        print("\n✅ Tìm thấy 'splits/split_info.json' trên S3.")
+        print("Dataloader đã chạy thành công trước đó. BỎ QUA (SKIPPED).")
+        return
 
     df       = load_csv("preprocessed/metadata_clean.csv", bucket=S3_OUTPUT_BUCKET)
     encoders = load_pkl("preprocessed/encoders.pkl",      bucket=S3_OUTPUT_BUCKET)
