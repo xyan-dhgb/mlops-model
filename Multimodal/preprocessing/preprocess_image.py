@@ -23,7 +23,7 @@ from tqdm import tqdm
 from s3_utils import (
     get_s3_client,
     download_bytes, upload_bytes, load_csv,
-    s3_key_exists,
+    s3_key_exists, list_s3_keys,
     S3_INPUT_BUCKET, S3_INPUT_PREFIX, S3_OUTPUT_BUCKET,
 )
 
@@ -95,6 +95,10 @@ def main():
 
     print("Bắt đầu trích xuất + tiền xử lý ảnh...")
     extracted = preprocessed = skipped = errors = 0
+    
+    # Bulk check existing files to avoid 20,000+ API calls
+    existing_raw = set(list_s3_keys("raw/images/", bucket=S3_OUTPUT_BUCKET))
+    existing_pre = set(list_s3_keys("preprocessed/images/", bucket=S3_OUTPUT_BUCKET))
 
     with h5py.File(hdf5_local, "r") as hf:
         all_keys = list(hf.keys())
@@ -107,13 +111,13 @@ def main():
 
                 # ── raw/images/<id>.jpg ← bytes gốc từ HDF5
                 raw_key = f"raw/images/{isic_id}.jpg"
-                if not s3_key_exists(raw_key, S3_OUTPUT_BUCKET):
+                if raw_key not in existing_raw:
                     upload_bytes(img_bytes, raw_key, S3_OUTPUT_BUCKET)
-                extracted += 1
+                    extracted += 1
 
                 # ── preprocessed/images/<id>.png ← sau pipeline
                 pre_key = f"preprocessed/images/{isic_id}.png"
-                if not s3_key_exists(pre_key, S3_OUTPUT_BUCKET):
+                if pre_key not in existing_pre:
                     img_pil = Image.open(io.BytesIO(img_bytes)).convert("RGB")
                     img_arr = np.array(img_pil)
                     img_proc = preprocess_image(img_arr)
