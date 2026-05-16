@@ -71,20 +71,29 @@ def main():
     print(f"  Mẫu khớp  : {len(df_available):,}")
 
     # ── Build arrays (khớp notebook cell 32 + 39) ───────────────────────
-    print("\nĐang tải ảnh + build arrays...")
-    X_tab_list, X_img_list, y_list = [], [], []
-
-    for _, row in tqdm(df_available.iterrows(), total=len(df_available)):
+    n_samples = len(df_available)
+    print(f"\nĐang tải ảnh + build arrays (pre-allocated cho {n_samples} mẫu)...")
+    
+    # Pre-allocate arrays to avoid OOM memory spikes
+    X_tabular = np.zeros((n_samples, len(feature_cols)), dtype=np.float32)
+    X_images  = np.zeros((n_samples, IMAGE_SIZE, IMAGE_SIZE, 3), dtype=np.float32)
+    y_labels  = np.zeros(n_samples, dtype=np.int32)
+    
+    valid_count = 0
+    for _, row in tqdm(df_available.iterrows(), total=n_samples):
         img = load_image_from_s3(row["isic_id"])
         if img is None:
             continue
-        X_tab_list.append(row[feature_cols].values.astype(np.float32))
-        X_img_list.append(img)
-        y_list.append(int(row["target"]))
+            
+        X_tabular[valid_count] = row[feature_cols].values.astype(np.float32)
+        X_images[valid_count] = img
+        y_labels[valid_count] = int(row["target"])
+        valid_count += 1
 
-    X_tabular = np.array(X_tab_list, dtype=np.float32)
-    X_images  = np.array(X_img_list, dtype=np.float32)
-    y_labels  = np.array(y_list,     dtype=np.int32)
+    # Trim arrays if some images failed to load
+    X_tabular = X_tabular[:valid_count]
+    X_images  = X_images[:valid_count]
+    y_labels  = y_labels[:valid_count]
 
     print(f"\nArrays built:")
     print(f"  X_tabular : {X_tabular.shape}")
