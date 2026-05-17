@@ -24,11 +24,11 @@ env:
   PYTHON_VERSION: "3.11"
 
 # =============================================================================
-# STAGE 1 - BUILD  (lint & static analysis on Multimodal/)
+# STAGE 1 - BUILD  (lint and static analysis on Multimodal/)
 # =============================================================================
 jobs:
   build:
-    name: "Build - Lint & Static Analysis"
+    name: "Build - Lint and Static Analysis"
     runs-on: ubuntu-latest
 
     steps:
@@ -129,7 +129,7 @@ jobs:
           aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
           aws-region: ${{ env.AWS_REGION }}
 
-      - name: "Get ECR registry URL & ensure repo exists"
+      - name: "Get ECR registry URL and ensure repo exists"
         id: get-registry
         run: |
           # Derive registry URL from the caller identity — no secret needed
@@ -141,7 +141,7 @@ jobs:
           # Ensure the ECR repo exists (only needs to happen once)
           aws ecr describe-repositories \
             --repository-names ${{ env.ECR_REPOSITORY }} \
-            --region ${{ env.AWS_REGION }} > /dev/null 2>&1 || \
+            --region ${{ env.AWS_REGION }} > /dev/null 2>and1 || \
           aws ecr create-repository \
             --repository-name ${{ env.ECR_REPOSITORY }} \
             --region ${{ env.AWS_REGION }} \
@@ -173,42 +173,42 @@ jobs:
             dockerfile: docker/02_preprocess/csv/Dockerfile
             context: .
 
-          # 02 - Preprocessing (Image)
+          # 03 - Preprocessing (Image)
           - service: preprocess-image
             dockerfile: docker/02_preprocess/image/Dockerfile
             context: .
 
-          # 03 - Dataloader
+          # 04 - Dataloader
           - service: dataloader
             dockerfile: docker/03_dataloader/Dockerfile
             context: .
 
-          # 04 - Model build (EfficientNetB3)
+          # 05 - Model build (EfficientNetB3)
           - service: build-model-efficientnetb3
             dockerfile: docker/04_build_model/efficientnetB3/Dockerfile
             context: .
 
-          # 04 - Model build (MLP)
+          # 06 - Model build (MLP)
           - service: build-model-mlp
             dockerfile: docker/04_build_model/mlp/Dockerfile
             context: .
 
-          # 05 - Training
+          # 07 - Training
           - service: train
             dockerfile: docker/05_train/Dockerfile
             context: .
 
-          # 06 - Evaluation
+          # 08 - Evaluation
           - service: evaluate
             dockerfile: docker/06_evaluate/Dockerfile
             context: .
 
-          # 07 - Explainability (XAI)
+          # 09 - Explainability (XAI)
           - service: xai
             dockerfile: docker/07_xai/Dockerfile
             context: .
 
-          # Drift Monitor
+          # 10 - Drift Monitor
           - service: drift-monitor
             dockerfile: docker/drift_monitor/Dockerfile
             context: .
@@ -248,8 +248,8 @@ jobs:
       - name: "Set up Docker Buildx"
         uses: docker/setup-buildx-action@v3
 
-      # ── Build & push image directly to ECR ────────────────────────────────
-      - name: "Build & Push - ${{ matrix.service }}"
+      # ── Build and push image directly to ECR ────────────────────────────────
+      - name: "Build and Push - ${{ matrix.service }}"
         uses: docker/build-push-action@v6
         with:
           context: ${{ matrix.context }}
