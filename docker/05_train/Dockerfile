@@ -1,14 +1,27 @@
 # Base image có CUDA 12.3 + cuDNN 9 - tương thích TensorFlow 2.16.1 GPU
+# Dùng runtime (nhẹ ~2GB) + cài thêm đúng CUDA compute libs mà TF training cần.
+# Không dùng devel (~5GB) để tránh SIGBUS khi extract layer lớn.
 FROM nvidia/cuda:12.3.2-cudnn9-runtime-ubuntu22.04
 
 WORKDIR /app
 
 # Cài Python 3.11 + pip + lib hệ thống
+# + CUDA compute libs mà TensorFlow cần để train trên GPU:
+#   libcublas   — matrix multiply (forward/backward pass)
+#   libcufft    — FFT ops
+#   libcurand   — random number generation (dropout, init)
+#   libcusolver — linear algebra solvers
+#   libcusparse — sparse matrix ops
 RUN apt-get update && apt-get install -y --no-install-recommends \
     python3.11 \
     python3.11-dev \
     python3-pip \
     libglib2.0-0 \
+    libcublas-12-3 \
+    libcufft-12-3 \
+    libcurand-12-3 \
+    libcusolver-12-3 \
+    libcusparse-12-3 \
     && ln -sf python3.11 /usr/bin/python \
     && ln -sf python3.11 /usr/bin/python3 \
     && rm -rf /var/lib/apt/lists/*
