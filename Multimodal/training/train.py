@@ -140,10 +140,14 @@ def build_train_dataset(
     tabular_dim: int,
     batch_size: int,
     oversample_ratio: float = 0.25,
-) -> tf.data.Dataset:
+) -> tuple[tf.data.Dataset, int]:
     """
     tf.data.Dataset với oversampling + augmentation online.
     X_img là np.memmap — chỉ đọc từng ảnh khi cần, không copy toàn bộ vào RAM.
+
+    Returns:
+        (dataset, steps_per_epoch) — dataset lặp vô hạn (.repeat()),
+        steps_per_epoch cần truyền vào model.fit() để Keras biết khi nào hết 1 epoch.
     """
     mal_idx = np.where(y == 1)[0]
     n_ben   = int((y == 0).sum())
@@ -158,26 +162,34 @@ def build_train_dataset(
 
     n_total   = len(all_idx)
     n_mal_tot = int((y == 1).sum()) + n_extra
+    steps_per_epoch = int(np.ceil(n_total / batch_size))
     print(f"  Train dataset: {len(y):,} gốc + {n_extra:,} oversample = {n_total:,} mẫu "
           f"(malignant {n_mal_tot/n_total:.1%})")
+    print(f"  steps_per_epoch = {steps_per_epoch}")
 
     # Giữ reference đến arrays (không copy)
     _X_img, _X_tab, _y = X_img, X_tab, y
+    _all_idx = all_idx  # snapshot để closure an toàn
 
     def generator():
-        for idx in all_idx:
-            img = _X_img[idx].copy()          # copy 1 ảnh (~600 KB)
-            is_mal = bool(_y[idx] == 1)
-            img = augment_image(img, strong=is_mal)
-            yield (
-                {
-                    "image_input":   img.astype(np.float32),
-                    "tabular_input": _X_tab[idx].astype(np.float32),
-                },
-                np.float32(_y[idx]),
-            )
+        """Generator lặp vô tận — .repeat() ở ngoài hoặc shuffle lại mỗi epoch."""
+        while True:
+            # Shuffle lại mỗi lần lặp để mỗi epoch khác nhau
+            epoch_idx = _all_idx.copy()
+            np.random.shuffle(epoch_idx)
+            for idx in epoch_idx:
+                img = _X_img[idx].copy()          # copy 1 ảnh (~600 KB)
+                is_mal = bool(_y[idx] == 1)
+                img = augment_image(img, strong=is_mal)
+                yield (
+                    {
+                        "image_input":   img.astype(np.float32),
+                        "tabular_input": _X_tab[idx].astype(np.float32),
+                    },
+                    np.float32(_y[idx]),
+                )
 
-    return (
+    ds = (
         tf.data.Dataset.from_generator(
             generator,
             output_signature=(
@@ -191,6 +203,7 @@ def build_train_dataset(
         .batch(batch_size)
         .prefetch(tf.data.AUTOTUNE)
     )
+    return ds, steps_per_epoch
 
 
 def build_val_dataset(
@@ -199,21 +212,30 @@ def build_val_dataset(
     y: np.ndarray,
     tabular_dim: int,
     batch_size: int,
-) -> tf.data.Dataset:
-    """Val dataset — không augment, không oversample, dùng memmap."""
+) -> tuple[tf.data.Dataset, int]:
+    """Val dataset — không augment, không oversample, dùng memmap.
+
+    Returns:
+        (dataset, validation_steps) — dataset lặp vô hạn (.repeat()),
+        validation_steps cần truyền vào model.fit() để đánh giá đúng số batch.
+    """
     _X_img, _X_tab, _y = X_img, X_tab, y
+    n_val = len(_y)
+    validation_steps = int(np.ceil(n_val / batch_size))
 
     def generator():
-        for i in range(len(_y)):
-            yield (
-                {
-                    "image_input":   _X_img[i].astype(np.float32),
-                    "tabular_input": _X_tab[i].astype(np.float32),
-                },
-                np.float32(_y[i]),
-            )
+        """Generator lặp vô tận để tương thích với .repeat() ngầm định."""
+        while True:
+            for i in range(n_val):
+                yield (
+                    {
+                        "image_input":   _X_img[i].astype(np.float32),
+                        "tabular_input": _X_tab[i].astype(np.float32),
+                    },
+                    np.float32(_y[i]),
+                )
 
-    return (
+    ds = (
         tf.data.Dataset.from_generator(
             generator,
             output_signature=(
@@ -227,6 +249,7 @@ def build_val_dataset(
         .batch(batch_size)
         .prefetch(tf.data.AUTOTUNE)
     )
+    return ds, validation_steps
 
 
 # ── Download splits về disk ───────────────────────────────────────────────
@@ -294,11 +317,11 @@ def main():
 
     # 5. Build tf.data datasets (oversampling online, không copy mảng)
     print("\n[4/5] Xây tf.data datasets...")
-    train_ds = build_train_dataset(
+    train_ds, steps_per_epoch = build_train_dataset(
         X_img_train, X_tab_train, y_train, tabular_dim,
         batch_size=BATCH_SIZE, oversample_ratio=OVERSAMPLE_RATIO,
     )
-    val_ds = build_val_dataset(
+    val_ds, validation_steps = build_val_dataset(
         X_img_val, X_tab_val, y_val, tabular_dim, batch_size=BATCH_SIZE,
     )
 
@@ -323,6 +346,8 @@ def main():
         train_ds,
         validation_data=val_ds,
         epochs=PHASE1_EPOCHS,
+        steps_per_epoch=steps_per_epoch,
+        validation_steps=validation_steps,
         callbacks=cb1,
         class_weight=class_weight,
         verbose=1,
@@ -346,11 +371,11 @@ def main():
     model = compile_model(model, PHASE2_LR)
 
     # Phase 2 dùng batch size nhỏ hơn + rebuild dataset
-    train_ds_p2 = build_train_dataset(
+    train_ds_p2, steps_per_epoch_p2 = build_train_dataset(
         X_img_train, X_tab_train, y_train, tabular_dim,
         batch_size=PHASE2_BATCH, oversample_ratio=OVERSAMPLE_RATIO,
     )
-    val_ds_p2 = build_val_dataset(
+    val_ds_p2, validation_steps_p2 = build_val_dataset(
         X_img_val, X_tab_val, y_val, tabular_dim, batch_size=PHASE2_BATCH,
     )
 
@@ -370,6 +395,8 @@ def main():
         train_ds_p2,
         validation_data=val_ds_p2,
         epochs=PHASE2_EPOCHS,
+        steps_per_epoch=steps_per_epoch_p2,
+        validation_steps=validation_steps_p2,
         callbacks=cb2,
         class_weight=class_weight,
         verbose=1,
