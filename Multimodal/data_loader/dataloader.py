@@ -78,18 +78,18 @@ def main():
     # ── Build arrays (khớp notebook cell 32 + 39) ───────────────────────
     n_samples = len(df_available)
     print(f"\nĐang tải ảnh + build arrays (pre-allocated cho {n_samples} mẫu)...")
-    
+
     # Pre-allocate arrays to avoid OOM memory spikes
     X_tabular = np.zeros((n_samples, len(feature_cols)), dtype=np.float32)
     X_images  = np.zeros((n_samples, IMAGE_SIZE, IMAGE_SIZE, 3), dtype=np.float32)
     y_labels  = np.zeros(n_samples, dtype=np.int32)
-    
+
     valid_count = 0
     for _, row in tqdm(df_available.iterrows(), total=n_samples):
         img = load_image_from_s3(row["isic_id"])
         if img is None:
             continue
-            
+
         X_tabular[valid_count] = row[feature_cols].values.astype(np.float32)
         X_images[valid_count] = img
         y_labels[valid_count] = int(row["target"])

@@ -95,7 +95,7 @@ def main():
 
     print("Bắt đầu trích xuất + tiền xử lý ảnh...")
     extracted = preprocessed = skipped = errors = 0
-    
+
     # Bulk check existing files to avoid 20,000+ API calls
     existing_raw = set(list_s3_keys("raw/images/", bucket=S3_OUTPUT_BUCKET))
     existing_pre = set(list_s3_keys("preprocessed/images/", bucket=S3_OUTPUT_BUCKET))
