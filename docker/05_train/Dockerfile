@@ -26,8 +26,9 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && ln -sf python3.11 /usr/bin/python3 \
     && rm -rf /var/lib/apt/lists/*
 
-# Tách TensorFlow ra layer riêng để Docker cache lại khi rebuild
-RUN pip install --no-cache-dir tensorflow==2.16.1
+# tensorflow[and-cuda] = GPU build (TF >= 2.12 tách CPU/GPU thành package riêng)
+# Không dùng "tensorflow" thuần vì pip sẽ cài bản CPU-only dù có CUDA sẵn.
+RUN pip install --no-cache-dir "tensorflow[and-cuda]==2.16.1"
 
 # Cài các thư viện còn lại
 RUN pip install --no-cache-dir \
