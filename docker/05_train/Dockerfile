@@ -1,13 +1,23 @@
-FROM python:3.11-slim
+# Base image có CUDA 12.3 + cuDNN 9 - tương thích TensorFlow 2.16.1 GPU
+FROM nvidia/cuda:12.3.2-cudnn9-runtime-ubuntu22.04
 
 WORKDIR /app
 
+# Cài Python 3.11 + pip + lib hệ thống
 RUN apt-get update && apt-get install -y --no-install-recommends \
+    python3.11 \
+    python3.11-dev \
+    python3-pip \
     libglib2.0-0 \
+    && ln -sf python3.11 /usr/bin/python \
+    && ln -sf python3.11 /usr/bin/python3 \
     && rm -rf /var/lib/apt/lists/*
 
+# Tách TensorFlow ra layer riêng để Docker cache lại khi rebuild
+RUN pip install --no-cache-dir tensorflow==2.16.1
+
+# Cài các thư viện còn lại
 RUN pip install --no-cache-dir \
-    tensorflow==2.16.1 \
     boto3==1.34.131 \
     numpy==1.26.4 \
     pandas==2.2.2 \
