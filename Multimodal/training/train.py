@@ -37,6 +37,7 @@ from augment import augment_image
 from s3_utils import (
     download_file, load_pkl, save_pkl,
     upload_bytes, upload_file,
+    s3_key_exists,
     S3_OUTPUT_BUCKET,
 )
 
@@ -278,6 +279,17 @@ def main():
     print("BƯỚC 5: Two-Phase Training  [memory-safe build]")
     print(f"  Bucket: s3://{S3_OUTPUT_BUCKET}/preprocessed/")
     print("=" * 60)
+
+    # ── Skip nếu cả 2 model đã được train và upload lên S3 ──────────────
+    KEY_PHASE1 = "preprocessed/best_model_phase1.h5"
+    KEY_PHASE2 = "preprocessed/best_model_isic2024.h5"
+    if s3_key_exists(KEY_PHASE1, bucket=S3_OUTPUT_BUCKET) and \
+       s3_key_exists(KEY_PHASE2, bucket=S3_OUTPUT_BUCKET):
+        print(f"\n[SKIP] Cả 2 model đã tồn tại trên S3:")
+        print(f"  ✓ s3://{S3_OUTPUT_BUCKET}/{KEY_PHASE1}")
+        print(f"  ✓ s3://{S3_OUTPUT_BUCKET}/{KEY_PHASE2}")
+        print("  → Bỏ qua training, chuyển sang evaluate.")
+        return
 
     gpus = setup_gpu()
 
