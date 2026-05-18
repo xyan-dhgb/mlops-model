@@ -14,6 +14,7 @@ RUN pip install --no-cache-dir \
     scikit-learn==1.5.0 \
     matplotlib==3.9.0 \
     Pillow==10.3.0 \
+    h5py==3.11.0 \
     shap==0.45.1 \
     tqdm==4.66.4
 
