@@ -14,6 +14,8 @@ RUN pip install --no-cache-dir \
     scikit-learn==1.5.0 \
     matplotlib==3.9.0 \
     Pillow==10.3.0 \
+    h5py==3.11.0 \
+    mlflow==2.13.0 \
     tqdm==4.66.4
 
 COPY Multimodal/training/evaluate.py .
