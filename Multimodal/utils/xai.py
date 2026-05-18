@@ -100,21 +100,25 @@ def overlay_and_save(model, isic_id, img_float, tab_arr, label, prob, prefix):
 def run_shap(model, X_tab_bg, X_img_bg, X_tab_test, X_img_test, feature_cols, prefix):
     import shap
 
-    @tf.function
-    def tab_predict(tab_input):
-        img_zero = tf.zeros([tf.shape(tab_input)[0], IMAGE_SIZE, IMAGE_SIZE, 3])
-        return model({"image_input": img_zero, "tabular_input": tab_input})
+    # GradientExplainer nhận model TF trực tiếp — không cần @tf.function wrapper.
+    # Inputs phải là list theo đúng thứ tự model.inputs: [image_input, tabular_input]
+    background = [X_img_bg,   X_tab_bg]    # (SHAP_BG, H, W, 3), (SHAP_BG, tabular_dim)
+    test_data  = [X_img_test, X_tab_test]  # (NUM_SHAP, ...)
 
-    explainer   = shap.DeepExplainer(tab_predict, X_tab_bg)
-    shap_vals   = np.array(explainer.shap_values(X_tab_test)).squeeze()
+    explainer     = shap.GradientExplainer(model, background)
+    shap_vals_all = explainer.shap_values(test_data)
+    # shap_vals_all → list[array] — 1 array per model input
+    # index 0 = image shap, index 1 = tabular shap (shape: n × tabular_dim)
+    shap_vals = np.array(shap_vals_all[1]).squeeze()
 
     save_npy(shap_vals, f"{prefix}shap_values.npy", bucket=S3_OUTPUT_BUCKET)
 
     # Waterfall plots (5 mẫu đầu)
+    expected_val = float(np.array(explainer.expected_value).ravel()[0])
     for i in range(min(5, len(X_tab_test))):
         exp = shap.Explanation(
             values=shap_vals[i],
-            base_values=float(explainer.expected_value),
+            base_values=expected_val,
             data=X_tab_test[i],
             feature_names=feature_cols,
         )
