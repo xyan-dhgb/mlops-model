@@ -18,8 +18,13 @@ Ghi lên S3:
   s3://kltn-isic-2024-colab/preprocessed/best_model_isic2024.h5
   s3://kltn-isic-2024-colab/preprocessed/training_history.pkl
   s3://kltn-isic-2024-colab/preprocessed/model_architecture.json
+
+MLflow:
+  - Log params + metrics mỗi epoch (cả 2 phase) vào tracking server
+  - Đăng ký model tốt nhất (phase 2) vào MLflow Model Registry
 """
 import os
+import sys
 import tempfile
 import numpy as np
 import tensorflow as tf
@@ -30,8 +35,12 @@ from tensorflow.keras.layers import (
     GlobalAveragePooling2D, BatchNormalization,
 )
 from tensorflow.keras.callbacks import (
-    EarlyStopping, ModelCheckpoint, ReduceLROnPlateau,
+    EarlyStopping, ModelCheckpoint, ReduceLROnPlateau, Callback,
 )
+
+import mlflow
+import mlflow.tensorflow
+from mlflow.models.signature import infer_signature
 
 from augment import augment_image
 from s3_utils import (
@@ -54,6 +63,11 @@ PHASE2_LR        = float(os.environ.get("PHASE2_LR",         "1e-4"))
 IMAGE_SIZE       = int(os.environ.get("IMAGE_SIZE",           "224"))
 IMAGE_SHAPE      = (IMAGE_SIZE, IMAGE_SIZE, 3)
 TMP_DIR          = "/tmp/train_data"
+
+# ── MLflow config ────────────────────────────────────────────────────────
+MLFLOW_TRACKING_URI  = os.environ.get("MLFLOW_TRACKING_URI",  "https://kltn-mlflow-ui.tech")
+MLFLOW_EXPERIMENT    = os.environ.get("MLFLOW_EXPERIMENT",    "isic2024-multimodal")
+MLFLOW_MODEL_NAME    = os.environ.get("MLFLOW_MODEL_NAME",    "isic2024-multimodal-best")
 
 
 # ── GPU setup ────────────────────────────────────────────────────────────
@@ -131,6 +145,25 @@ def compile_model(model, lr):
         ],
     )
     return model
+
+
+# ── MLflow per-epoch callback ────────────────────────────────────────────
+class MlflowEpochLogger(Callback):
+    """Log metrics lên MLflow sau mỗi epoch."""
+
+    def __init__(self, phase: str):
+        super().__init__()
+        self.phase = phase  # "phase1" hoặc "phase2"
+
+    def on_epoch_end(self, epoch, logs=None):
+        if logs is None:
+            return
+        step = epoch
+        metrics = {}
+        for k, v in logs.items():
+            # prefix để phân biệt phase1/phase2 trong cùng 1 run
+            metrics[f"{self.phase}/{k}"] = float(v)
+        mlflow.log_metrics(metrics, step=step)
 
 
 # ── tf.data helpers ──────────────────────────────────────────────────────
@@ -289,7 +322,12 @@ def main():
         print(f"  ✓ s3://{S3_OUTPUT_BUCKET}/{KEY_PHASE1}")
         print(f"  ✓ s3://{S3_OUTPUT_BUCKET}/{KEY_PHASE2}")
         print("  → Bỏ qua training, chuyển sang evaluate.")
-        return
+        # Exit 0 → Argo Workflows đánh dấu step là Succeeded
+        sys.exit(0)
+
+    # ── Khởi tạo MLflow ─────────────────────────────────────────────────
+    mlflow.set_tracking_uri(MLFLOW_TRACKING_URI)
+    mlflow.set_experiment(MLFLOW_EXPERIMENT)
 
     gpus = setup_gpu()
 
@@ -337,95 +375,156 @@ def main():
         X_img_val, X_tab_val, y_val, tabular_dim, batch_size=BATCH_SIZE,
     )
 
-    # ── PHASE 1: Frozen backbone ─────────────────────────────────
-    print("\n" + "=" * 60)
-    print("PHASE 1: Frozen backbone")
-    print("=" * 60)
+    # ── Mở 1 MLflow run cho toàn bộ quá trình training ──────────────────
+    with mlflow.start_run(run_name="two-phase-training") as run:
+        run_id = run.info.run_id
+        print(f"\n  MLflow Run ID: {run_id}")
 
-    with tempfile.NamedTemporaryFile(suffix=".h5", delete=False, dir=TMP_DIR) as tmp1:
-        phase1_local = tmp1.name
+        # Log hyperparameters
+        mlflow.log_params({
+            "phase1_epochs":    PHASE1_EPOCHS,
+            "phase2_epochs":    PHASE2_EPOCHS,
+            "batch_size":       BATCH_SIZE,
+            "phase2_batch":     PHASE2_BATCH,
+            "oversample_ratio": OVERSAMPLE_RATIO,
+            "class_weight_mal": CLASS_W_MAL,
+            "fine_tune_from":   FINE_TUNE_FROM,
+            "phase1_lr":        PHASE1_LR,
+            "phase2_lr":        PHASE2_LR,
+            "image_size":       IMAGE_SIZE,
+            "tabular_dim":      tabular_dim,
+            "n_train":          len(y_train),
+            "n_val":            len(y_val),
+            "n_gpu":            len(gpus),
+            "s3_bucket":        S3_OUTPUT_BUCKET,
+        })
 
-    cb1 = [
-        EarlyStopping(monitor="val_auc", patience=5,
-                      restore_best_weights=True, mode="max", verbose=1),
-        ModelCheckpoint(phase1_local, monitor="val_auc",
-                        save_best_only=True, mode="max", verbose=1),
-        ReduceLROnPlateau(monitor="val_auc", factor=0.5,
-                          patience=3, min_lr=1e-6, verbose=1),
-    ]
+        # ── PHASE 1: Frozen backbone ─────────────────────────────────
+        print("\n" + "=" * 60)
+        print("PHASE 1: Frozen backbone")
+        print("=" * 60)
 
-    h1 = model.fit(
-        train_ds,
-        validation_data=val_ds,
-        epochs=PHASE1_EPOCHS,
-        steps_per_epoch=steps_per_epoch,
-        validation_steps=validation_steps,
-        callbacks=cb1,
-        class_weight=class_weight,
-        verbose=1,
-    )
+        with tempfile.NamedTemporaryFile(suffix=".h5", delete=False, dir=TMP_DIR) as tmp1:
+            phase1_local = tmp1.name
 
-    upload_file(phase1_local, "preprocessed/best_model_phase1.h5",
-                bucket=S3_OUTPUT_BUCKET)
-    os.unlink(phase1_local)
+        cb1 = [
+            EarlyStopping(monitor="val_auc", patience=5,
+                          restore_best_weights=True, mode="max", verbose=1),
+            ModelCheckpoint(phase1_local, monitor="val_auc",
+                            save_best_only=True, mode="max", verbose=1),
+            ReduceLROnPlateau(monitor="val_auc", factor=0.5,
+                              patience=3, min_lr=1e-6, verbose=1),
+            MlflowEpochLogger(phase="phase1"),
+        ]
 
-    # ── PHASE 2: Unfreeze backbone ───────────────────────────────
-    print("\n" + "=" * 60)
-    print(f"PHASE 2: Fine-tune EfficientNetB3 từ layer {FINE_TUNE_FROM}")
-    print("=" * 60)
+        h1 = model.fit(
+            train_ds,
+            validation_data=val_ds,
+            epochs=PHASE1_EPOCHS,
+            steps_per_epoch=steps_per_epoch,
+            validation_steps=validation_steps,
+            callbacks=cb1,
+            class_weight=class_weight,
+            verbose=1,
+        )
 
-    backbone.trainable = True
-    for layer in backbone.layers[:FINE_TUNE_FROM]:
-        layer.trainable = False
-    print(f"  Layers mở đóng băng: "
-          f"{sum(1 for l in backbone.layers if l.trainable)}/{len(backbone.layers)}")
+        # Log best phase1 metrics
+        best_p1_auc = max(h1.history.get("val_auc", [0.0]))
+        mlflow.log_metric("phase1/best_val_auc", best_p1_auc)
 
-    model = compile_model(model, PHASE2_LR)
+        upload_file(phase1_local, KEY_PHASE1, bucket=S3_OUTPUT_BUCKET)
+        os.unlink(phase1_local)
 
-    # Phase 2 dùng batch size nhỏ hơn + rebuild dataset
-    train_ds_p2, steps_per_epoch_p2 = build_train_dataset(
-        X_img_train, X_tab_train, y_train, tabular_dim,
-        batch_size=PHASE2_BATCH, oversample_ratio=OVERSAMPLE_RATIO,
-    )
-    val_ds_p2, validation_steps_p2 = build_val_dataset(
-        X_img_val, X_tab_val, y_val, tabular_dim, batch_size=PHASE2_BATCH,
-    )
+        # ── PHASE 2: Unfreeze backbone ───────────────────────────────
+        print("\n" + "=" * 60)
+        print(f"PHASE 2: Fine-tune EfficientNetB3 từ layer {FINE_TUNE_FROM}")
+        print("=" * 60)
 
-    with tempfile.NamedTemporaryFile(suffix=".h5", delete=False, dir=TMP_DIR) as tmp2:
-        best_local = tmp2.name
+        backbone.trainable = True
+        for layer in backbone.layers[:FINE_TUNE_FROM]:
+            layer.trainable = False
+        print(f"  Layers mở đóng băng: "
+              f"{sum(1 for l in backbone.layers if l.trainable)}/{len(backbone.layers)}")
 
-    cb2 = [
-        EarlyStopping(monitor="val_auc", patience=7,
-                      restore_best_weights=True, mode="max", verbose=1),
-        ModelCheckpoint(best_local, monitor="val_auc",
-                        save_best_only=True, mode="max", verbose=1),
-        ReduceLROnPlateau(monitor="val_auc", factor=0.3,
-                          patience=3, min_lr=1e-7, verbose=1),
-    ]
+        model = compile_model(model, PHASE2_LR)
 
-    h2 = model.fit(
-        train_ds_p2,
-        validation_data=val_ds_p2,
-        epochs=PHASE2_EPOCHS,
-        steps_per_epoch=steps_per_epoch_p2,
-        validation_steps=validation_steps_p2,
-        callbacks=cb2,
-        class_weight=class_weight,
-        verbose=1,
-    )
+        # Phase 2 dùng batch size nhỏ hơn + rebuild dataset
+        train_ds_p2, steps_per_epoch_p2 = build_train_dataset(
+            X_img_train, X_tab_train, y_train, tabular_dim,
+            batch_size=PHASE2_BATCH, oversample_ratio=OVERSAMPLE_RATIO,
+        )
+        val_ds_p2, validation_steps_p2 = build_val_dataset(
+            X_img_val, X_tab_val, y_val, tabular_dim, batch_size=PHASE2_BATCH,
+        )
 
-    upload_file(best_local, "preprocessed/best_model_isic2024.h5",
-                bucket=S3_OUTPUT_BUCKET)
-    os.unlink(best_local)
+        with tempfile.NamedTemporaryFile(suffix=".h5", delete=False, dir=TMP_DIR) as tmp2:
+            best_local = tmp2.name
 
-    # Lưu history
-    save_pkl(
-        {"phase1": h1.history, "phase2": h2.history},
-        "preprocessed/training_history.pkl",
-        bucket=S3_OUTPUT_BUCKET,
-    )
+        cb2 = [
+            EarlyStopping(monitor="val_auc", patience=7,
+                          restore_best_weights=True, mode="max", verbose=1),
+            ModelCheckpoint(best_local, monitor="val_auc",
+                            save_best_only=True, mode="max", verbose=1),
+            ReduceLROnPlateau(monitor="val_auc", factor=0.3,
+                              patience=3, min_lr=1e-7, verbose=1),
+            MlflowEpochLogger(phase="phase2"),
+        ]
 
-    print(f"\n[5/5] Model → s3://{S3_OUTPUT_BUCKET}/preprocessed/best_model_isic2024.h5")
+        h2 = model.fit(
+            train_ds_p2,
+            validation_data=val_ds_p2,
+            epochs=PHASE2_EPOCHS,
+            steps_per_epoch=steps_per_epoch_p2,
+            validation_steps=validation_steps_p2,
+            callbacks=cb2,
+            class_weight=class_weight,
+            verbose=1,
+        )
+
+        # Log best phase2 metrics
+        best_p2_auc     = max(h2.history.get("val_auc",       [0.0]))
+        best_p2_recall  = max(h2.history.get("val_recall",    [0.0]))
+        best_p2_prec    = max(h2.history.get("val_precision",  [0.0]))
+        mlflow.log_metric("phase2/best_val_auc",       best_p2_auc)
+        mlflow.log_metric("phase2/best_val_recall",    best_p2_recall)
+        mlflow.log_metric("phase2/best_val_precision", best_p2_prec)
+
+        # Upload model tốt nhất (phase 2) lên S3
+        upload_file(best_local, KEY_PHASE2, bucket=S3_OUTPUT_BUCKET)
+
+        # ── Đăng ký model vào MLflow Model Registry ──────────────────
+        print("\n[5/5] Đăng ký model vào MLflow Model Registry...")
+        artifact_path = "model"
+        mlflow.tensorflow.log_model(
+            model,
+            artifact_path=artifact_path,
+            registered_model_name=MLFLOW_MODEL_NAME,
+        )
+
+        model_uri = f"runs:/{run_id}/{artifact_path}"
+        mv = mlflow.register_model(model_uri, MLFLOW_MODEL_NAME)
+        print(f"  ✓ Registered: {MLFLOW_MODEL_NAME} v{mv.version}")
+
+        # Tag run với S3 path và best AUC để dễ tra cứu
+        mlflow.set_tags({
+            "s3_model_phase1": f"s3://{S3_OUTPUT_BUCKET}/{KEY_PHASE1}",
+            "s3_model_phase2": f"s3://{S3_OUTPUT_BUCKET}/{KEY_PHASE2}",
+            "best_val_auc":    str(round(best_p2_auc, 4)),
+            "model_version":   str(mv.version),
+        })
+
+        os.unlink(best_local)
+
+        # Lưu history lên S3
+        save_pkl(
+            {"phase1": h1.history, "phase2": h2.history},
+            "preprocessed/training_history.pkl",
+            bucket=S3_OUTPUT_BUCKET,
+        )
+
+    print(f"\n  Model → s3://{S3_OUTPUT_BUCKET}/{KEY_PHASE2}")
+    print(f"  MLflow Run: {MLFLOW_TRACKING_URI}/#/experiments/{MLFLOW_EXPERIMENT}/runs/{run_id}")
+    print(f"  Registry  : {MLFLOW_MODEL_NAME} v{mv.version}")
     print("\nBước 5 hoàn thành!")
 
 
