@@ -150,6 +150,18 @@ def load_png(s3_key: str, bucket: str = S3_OUTPUT_BUCKET) -> np.ndarray:
 
 
 # ── Keras model helpers ──────────────────────────────────────────────────
+import tensorflow as tf
+
+class _Keras2BatchNorm(tf.keras.layers.BatchNormalization):
+    """Compatibility shim: silently drops Keras-2-only kwargs
+    (renorm, renorm_clipping, renorm_momentum) so .h5 models saved with
+    old tf.keras can be loaded by Keras 3 without ValueError."""
+    def __init__(self, **kwargs):
+        for k in ("renorm", "renorm_clipping", "renorm_momentum"):
+            kwargs.pop(k, None)
+        super().__init__(**kwargs)
+
+
 def save_keras_model(model, s3_key: str, bucket: str = S3_OUTPUT_BUCKET):
     """Lưu model Keras (.h5) lên S3 qua file tạm."""
     with tempfile.NamedTemporaryFile(suffix=".h5", delete=False) as tmp:
@@ -160,10 +172,14 @@ def save_keras_model(model, s3_key: str, bucket: str = S3_OUTPUT_BUCKET):
 
 def load_keras_model(s3_key: str, bucket: str = S3_OUTPUT_BUCKET,
                      custom_objects=None):
-    import tensorflow as tf
+    # Inject _Keras2BatchNorm shim so .h5 models saved with Keras 2
+    # (which stored renorm/renorm_clipping/renorm_momentum) load cleanly
+    # under Keras 3 that no longer accepts those kwargs.
+    merged = {"BatchNormalization": _Keras2BatchNorm}
+    if custom_objects:
+        merged.update(custom_objects)
     with tempfile.NamedTemporaryFile(suffix=".h5", delete=False) as tmp:
         download_file(s3_key, tmp.name, bucket)
-        model = tf.keras.models.load_model(tmp.name,
-                                           custom_objects=custom_objects)
+        model = tf.keras.models.load_model(tmp.name, custom_objects=merged)
     os.unlink(tmp.name)
     return model
