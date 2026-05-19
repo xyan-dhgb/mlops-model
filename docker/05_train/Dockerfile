@@ -38,7 +38,13 @@ RUN pip install --no-cache-dir \
     scikit-learn==1.5.0 \
     opencv-python-headless==4.10.0.84 \
     Pillow==10.3.0 \
-    tqdm==4.66.4
+    tqdm==4.66.4 \
+    mlflow>=2.10.0 \
+    h5py>=3.9.0 \
+    PyYAML>=6.0 \
+    matplotlib>=3.7.0 \
+    seaborn>=0.13.0 \
+    scikit-image>=0.21.0
 
 COPY Multimodal/training/train.py .
 COPY Multimodal/training/augment.py .
