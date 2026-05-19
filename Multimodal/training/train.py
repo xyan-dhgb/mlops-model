@@ -50,6 +50,11 @@ from s3_utils import (
     S3_OUTPUT_BUCKET,
 )
 
+try:
+    from ml_metrics import MetricsServer, record_epoch_metrics
+except ImportError:
+    pass
+
 # ── Hyperparameters ──────────────────────────────────────────────────────
 PHASE1_EPOCHS    = int(os.environ.get("PHASE1_EPOCHS",        "20"))
 PHASE2_EPOCHS    = int(os.environ.get("PHASE2_EPOCHS",        "10"))
@@ -164,6 +169,33 @@ class MlflowEpochLogger(Callback):
             # prefix để phân biệt phase1/phase2 trong cùng 1 run
             metrics[f"{self.phase}/{k}"] = float(v)
         mlflow.log_metrics(metrics, step=step)
+
+
+class PrometheusEpochLogger(Callback):
+    """Log metrics lên Prometheus sau mỗi epoch."""
+
+    def __init__(self, total_epochs, phase: str):
+        super().__init__()
+        self.total_epochs = total_epochs
+        self.phase = phase
+
+    def on_epoch_end(self, epoch, logs=None):
+        if logs is None:
+            return
+        
+        try:
+            record_epoch_metrics(
+                epoch=epoch,
+                total_epochs=self.total_epochs,
+                train_loss=float(logs.get("loss", 0.0)),
+                val_loss=float(logs.get("val_loss", 0.0)),
+                val_auc=float(logs.get("val_auc", 0.0)),
+                val_pauc=float(logs.get("val_pauc", 0.0)),
+                model_name="isic-multimodal",
+                modality=self.phase
+            )
+        except NameError:
+            pass
 
 
 # ── tf.data helpers ──────────────────────────────────────────────────────
@@ -308,6 +340,11 @@ def download_splits() -> dict:
 
 # ── Main ─────────────────────────────────────────────────────────────────
 def main():
+    try:
+        MetricsServer.start()
+    except NameError:
+        pass
+        
     print("=" * 60)
     print("BƯỚC 5: Two-Phase Training  [memory-safe build]")
     print(f"  Bucket: s3://{S3_OUTPUT_BUCKET}/preprocessed/")
@@ -415,6 +452,7 @@ def main():
             ReduceLROnPlateau(monitor="val_auc", factor=0.5,
                               patience=3, min_lr=1e-6, verbose=1),
             MlflowEpochLogger(phase="phase1"),
+            PrometheusEpochLogger(total_epochs=PHASE1_EPOCHS, phase="phase1"),
         ]
 
         h1 = model.fit(
@@ -468,6 +506,7 @@ def main():
             ReduceLROnPlateau(monitor="val_auc", factor=0.3,
                               patience=3, min_lr=1e-7, verbose=1),
             MlflowEpochLogger(phase="phase2"),
+            PrometheusEpochLogger(total_epochs=PHASE2_EPOCHS, phase="phase2"),
         ]
 
         h2 = model.fit(
