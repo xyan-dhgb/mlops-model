@@ -1,8 +1,12 @@
-FROM tensorflow/tensorflow:2.16.1-gpu
+# tensorflow-cpu: ~600 MB vs tensorflow:2.16.1-gpu ~4.8 GB
+# build_efficientnetB3.py only defines & saves model architecture - no GPU needed
+FROM python:3.10-slim
 
 WORKDIR /app
 
-RUN pip install --no-cache-dir \
+RUN pip install --no-cache-dir --retries 5 --timeout 60 \
+    boto3==1.34.131 \
+    tensorflow-cpu==2.16.1 \
     numpy==1.26.4 \
     h5py==3.11.0
 

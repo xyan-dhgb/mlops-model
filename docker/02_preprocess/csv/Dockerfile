@@ -3,6 +3,7 @@ FROM python:3.10-slim
 WORKDIR /app
 
 RUN pip install --no-cache-dir \
+    boto3==1.34.131 \
     numpy==1.26.4 \
     pandas==2.2.2 \
     scikit-learn==1.5.0

@@ -2,16 +2,20 @@ FROM python:3.10-slim
 
 WORKDIR /app
 
-RUN pip install --no-cache-dir \
+RUN pip install --no-cache-dir --retries 5 --timeout 60 \
+    boto3==1.34.131 \
     numpy==1.26.4 \
     pandas==2.2.2 \
-    scikit-learn==1.5.0
+    Pillow==10.3.0 \
+    scikit-learn==1.5.0 \
+    tqdm==4.66.4
 
 COPY Multimodal/data_loader/dataloader.py .
 COPY Multimodal/s3_utils.py .
 
 ENV PROCESSED_DIR=/data/processed
 ENV SPLITS_DIR=/data/splits
+ENV IMAGE_SIZE=224
 ENV RANDOM_SEED=42
 
 CMD ["python", "dataloader.py"]

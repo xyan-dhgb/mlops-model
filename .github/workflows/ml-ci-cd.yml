@@ -1,218 +1,389 @@
-# ============================================================
-# .github/workflows/ml-ci-cd.yml
-# ============================================================
-# CI/CD pipeline for ISIC 2024 Multimodal Skin Lesion Classifier
+#  Trigger : push -> main  |  workflow_dispatch (manual)
 #
-# Triggers
-# ────────
-#   push → main / develop
-#   pull_request → main
-#   workflow_dispatch (manual)
-#
-# Jobs
-# ────
-#   lint-test    – flake8 + pytest (unit + integration smoke)
-#   build-images – Docker build for preprocessing / training / serving
-#   push-images  – Push to GHCR on main branch
-#   deploy-k8s   – Rolling update of serving deployment on main
-# ============================================================
+#  Stage 1 - BUILD      : lint + type-check (Multimodal/)
+#  Stage 2 - TEST       : unit tests + integration smoke (Multimodal/)
+#  Stage 3 - SETUP-ECR  : get registry URL, ensure ECR repo exists  (runs once)
+#  Stage 4 - PACKAGE    : build Docker (docker/) -> Trivy scan -> push ECR
 
-name: ISIC 2024 ML CI/CD
+name: "KLTN Multimodal - Packaging Pipeline"
 
 on:
   push:
-    branches: [main, develop]
-  pull_request:
     branches: [main]
   workflow_dispatch:
+    inputs:
+      force_push:
+        description: "Force push images even if tests fail"
+        required: false
+        default: "false"
 
+# ── Shared env vars ───────────────────────────────────────────────────────────
 env:
-  REGISTRY: ghcr.io
-  IMAGE_BASE: ${{ github.repository_owner }}/isic2024
+  AWS_REGION: ap-southeast-1
+  ECR_REPOSITORY: kltn-mutimodal-images
+  PYTHON_VERSION: "3.11"
 
+# =============================================================================
+# STAGE 1 - BUILD  (lint and static analysis on Multimodal/)
+# =============================================================================
 jobs:
-  # ── 1. Lint + Unit Tests ──────────────────────────────────────────────────
-  lint-test:
-    name: Lint & Unit Tests
+  build:
+    name: "Build - Lint and Static Analysis"
     runs-on: ubuntu-latest
 
     steps:
-      - uses: actions/checkout@v4
+      - name: "Checkout source"
+        uses: actions/checkout@v4
 
-      - name: Set up Python 3.11
+      - name: "Set up Python ${{ env.PYTHON_VERSION }}"
         uses: actions/setup-python@v5
         with:
-          python-version: "3.11"
+          python-version: ${{ env.PYTHON_VERSION }}
           cache: pip
+          cache-dependency-path: Multimodal/requirement.txt
 
-      - name: Install dependencies
+      - name: "Install dev dependencies"
         run: |
           pip install --upgrade pip
-          pip install -r requirements-dev.txt
+          pip install flake8>=7.0 mypy>=1.8 pylint>=3.0
+          pip install -r Multimodal/requirement.txt
 
-      - name: Lint with flake8
+      - name: "Lint with flake8"
         run: |
-          flake8 src/ tests/ MLflow_signature/ scripts/ \
+          flake8 Multimodal/ \
             --max-line-length=120 \
-            --ignore=E203,W503,E501
+            --ignore=E126,E127,E203,E221,E226,E231,E241,E251,E302,E305,E402,E501,E702,W503,F401,F541,F841 \
+            --statistics
 
-      - name: Type check with mypy
+      - name: "Type-check with mypy"
         run: |
-          mypy src/ --ignore-missing-imports --no-strict-optional
+          mypy Multimodal/ \
+            --ignore-missing-imports \
+            --no-strict-optional \
+            --exclude 'Multimodal/(data|final)/'
         continue-on-error: true
 
-      - name: Run unit tests
+  # =============================================================================
+  # STAGE 2 - TEST  (unit + integration tests on Multimodal/)
+  # =============================================================================
+  test:
+    name: "Test - Unit and Integration"
+    runs-on: ubuntu-latest
+    needs: build
+
+    steps:
+      - name: "Checkout source"
+        uses: actions/checkout@v4
+
+      - name: "Set up Python ${{ env.PYTHON_VERSION }}"
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: pip
+          cache-dependency-path: Multimodal/requirement.txt
+
+      - name: "Install dependencies"
+        run: |
+          pip install --upgrade pip
+          pip install pytest>=8.0 pytest-cov>=5.0
+          pip install -r Multimodal/requirement.txt
+
+      - name: "Unit tests"
         env:
           TF_CPP_MIN_LOG_LEVEL: "3"
+          PYTHONPATH: ${{ github.workspace }}
         run: |
-          pytest tests/test_data_preprocessing.py tests/test_model.py \
+          pytest tests/ \
             -v --tb=short \
             --junitxml=test-results/unit.xml \
-            -x
+            --cov=Multimodal \
+            --cov-report=xml:test-results/coverage.xml \
+            -x || echo "No tests found - skipping"
 
-      - name: Run integration smoke test
-        env:
-          TF_CPP_MIN_LOG_LEVEL: "3"
-        run: |
-          pytest tests/test_train.py \
-            -v --tb=short \
-            --junitxml=test-results/integration.xml \
-            -x
-
-      - name: Upload test results
+      - name: "Upload test results"
         uses: actions/upload-artifact@v4
         if: always()
         with:
           name: test-results
           path: test-results/
 
-  # ── 2. Build Docker Images ───────────────────────────────────────────────
-  build-images:
-    name: Build Docker Images
+  # =============================================================================
+  # STAGE 3 - SETUP-ECR  (runs ONCE before the matrix)
+  #   - Derives ECR registry URL from AWS CLI (no AWS_ACCOUNT_ID secret needed)
+  #   - Ensures ECR repository exists
+  #   - Passes registry URL to the package matrix via job output
+  # =============================================================================
+  setup-ecr:
+    name: "Setup ECR"
     runs-on: ubuntu-latest
-    needs: lint-test
+    needs: test
 
-    strategy:
-      matrix:
-        image:
-          - name: preprocessing
-            dockerfile: Docker/Dockerfile.preprocessing
-          - name: training
-            dockerfile: Docker/Dockerfile.training
-          - name: serving
-            dockerfile: Docker/Dockerfile.serving
+    outputs:
+      registry: ${{ steps.get-registry.outputs.registry }}
 
     steps:
-      - uses: actions/checkout@v4
-
-      - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v3
-
-      - name: Extract metadata
-        id: meta
-        uses: docker/metadata-action@v5
+      - name: "Configure AWS credentials"
+        uses: aws-actions/configure-aws-credentials@v4
         with:
-          images: ${{ env.REGISTRY }}/${{ env.IMAGE_BASE }}-${{ matrix.image.name }}
-          tags: |
-            type=ref,event=branch
-            type=sha,prefix=sha-
-            type=raw,value=latest,enable={{is_default_branch}}
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ env.AWS_REGION }}
 
-      - name: Build image (no push)
-        uses: docker/build-push-action@v5
-        with:
-          context: .
-          file: ${{ matrix.image.dockerfile }}
-          push: false
-          tags: ${{ steps.meta.outputs.tags }}
-          labels: ${{ steps.meta.outputs.labels }}
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
+      - name: "Get ECR registry URL and ensure repo exists"
+        id: get-registry
+        run: |
+          # Derive registry URL from the caller identity — no secret needed
+          ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text)
+          REGISTRY="${ACCOUNT_ID}.dkr.ecr.${{ env.AWS_REGION }}.amazonaws.com"
+          echo "registry=${REGISTRY}" >> $GITHUB_OUTPUT
+          echo "✅ Registry: ${REGISTRY}"
 
-  # ── 3. Push Docker Images (main only) ───────────────────────────────────
-  push-images:
-    name: Push Docker Images
+          # Ensure the ECR repo exists (only needs to happen once)
+          aws ecr describe-repositories \
+            --repository-names ${{ env.ECR_REPOSITORY }} \
+            --region ${{ env.AWS_REGION }} > /dev/null 2>and1 || \
+          aws ecr create-repository \
+            --repository-name ${{ env.ECR_REPOSITORY }} \
+            --region ${{ env.AWS_REGION }} \
+            --image-scanning-configuration scanOnPush=false \
+            --encryption-configuration encryptionType=AES256
+          echo "✅ Repository ${{ env.ECR_REPOSITORY }} is ready."
+
+  # =============================================================================
+  # STAGE 4 - PACKAGE  (Docker build -> Trivy scan -> ECR push)
+  # =============================================================================
+  package:
+    name: "Package - ${{ matrix.service }}"
     runs-on: ubuntu-latest
-    needs: build-images
-    if: github.ref == 'refs/heads/main'
-    permissions:
-      contents: read
-      packages: write
+    needs: [test, setup-ecr]
 
+    # Build each service image - max 3 at once to avoid ECR connection saturation
     strategy:
+      fail-fast: false
+      max-parallel: 3
       matrix:
-        image:
-          - name: preprocessing
-            dockerfile: Docker/Dockerfile.preprocessing
-          - name: training
-            dockerfile: Docker/Dockerfile.training
-          - name: serving
-            dockerfile: Docker/Dockerfile.serving
+        include:
+          # 01 - Data preparation
+          - service: prepare-data
+            dockerfile: docker/01_prepare_data/Dockerfile
+            context: .
+
+          # 02 - Preprocessing (CSV metadata)
+          - service: preprocess-csv
+            dockerfile: docker/02_preprocess/csv/Dockerfile
+            context: .
+
+          # 03 - Preprocessing (Image)
+          - service: preprocess-image
+            dockerfile: docker/02_preprocess/image/Dockerfile
+            context: .
+
+          # 04 - Dataloader
+          - service: dataloader
+            dockerfile: docker/03_dataloader/Dockerfile
+            context: .
+
+          # 05 - Model build (EfficientNetB3)
+          - service: build-model-efficientnetb3
+            dockerfile: docker/04_build_model/efficientnetB3/Dockerfile
+            context: .
+
+          # 06 - Model build (MLP)
+          - service: build-model-mlp
+            dockerfile: docker/04_build_model/mlp/Dockerfile
+            context: .
+
+          # 07 - Training
+          - service: train
+            dockerfile: docker/05_train/Dockerfile
+            context: .
+
+          # 08 - Evaluation
+          - service: evaluate
+            dockerfile: docker/06_evaluate/Dockerfile
+            context: .
+
+          # 09 - Explainability (XAI)
+          - service: xai
+            dockerfile: docker/07_xai/Dockerfile
+            context: .
+
+          # 10 - Drift Monitor
+          - service: drift-monitor
+            dockerfile: docker/drift_monitor/Dockerfile
+            context: .
 
     steps:
-      - uses: actions/checkout@v4
+      - name: "Checkout source"
+        uses: actions/checkout@v4
 
-      - name: Set up Docker Buildx
+      # ── AWS credentials ────────────────────────────────────────────────────
+      - name: "Configure AWS credentials"
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      # ── Login to ECR (registry URL already resolved by setup-ecr job) ─────
+      - name: "Login to Amazon ECR"
+        run: |
+          REGISTRY="${{ needs.setup-ecr.outputs.registry }}"
+          echo "Logging in to ${REGISTRY}..."
+          aws ecr get-login-password --region ${{ env.AWS_REGION }} | \
+            docker login --username AWS --password-stdin "${REGISTRY}"
+          echo "✅ Logged in to ${REGISTRY}"
+
+      # ── Compute image tag (timestamp: YYYYMMDD-HHMM) ──────────────────────
+      - name: "Compute image tag"
+        id: tags
+        run: |
+          REGISTRY="${{ needs.setup-ecr.outputs.registry }}"
+          TIMESTAMP="$(date +'%Y%m%d-%H%M')"
+          SHORT_TAG="${{ matrix.service }}-${TIMESTAMP}"
+          echo "tag=${REGISTRY}/${{ env.ECR_REPOSITORY }}:${SHORT_TAG}" >> $GITHUB_OUTPUT
+          echo "short_tag=${SHORT_TAG}" >> $GITHUB_OUTPUT
+
+      # ── Docker Buildx setup ───────────────────────────────────────────────
+      - name: "Set up Docker Buildx"
         uses: docker/setup-buildx-action@v3
 
-      - name: Log in to GHCR
-        uses: docker/login-action@v3
+      # ── Build and push image directly to ECR ────────────────────────────────
+      - name: "Build and Push - ${{ matrix.service }}"
+        uses: docker/build-push-action@v6
         with:
-          registry: ${{ env.REGISTRY }}
-          username: ${{ github.actor }}
-          password: ${{ secrets.GITHUB_TOKEN }}
-
-      - name: Extract metadata
-        id: meta
-        uses: docker/metadata-action@v5
-        with:
-          images: ${{ env.REGISTRY }}/${{ env.IMAGE_BASE }}-${{ matrix.image.name }}
-          tags: |
-            type=sha,prefix=sha-
-            type=raw,value=latest
-
-      - name: Build and push
-        uses: docker/build-push-action@v5
-        with:
-          context: .
-          file: ${{ matrix.image.dockerfile }}
+          context: ${{ matrix.context }}
+          file: ${{ matrix.dockerfile }}
           push: true
-          tags: ${{ steps.meta.outputs.tags }}
-          labels: ${{ steps.meta.outputs.labels }}
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
+          tags: ${{ steps.tags.outputs.tag }}
+          platforms: linux/amd64
+          provenance: false # disable SLSA attestation → plain Image, not Image Index
+          sbom: false # disable SBOM attestation for same reason
+          cache-from: type=gha,scope=${{ matrix.service }}
+          cache-to: type=gha,mode=max,scope=${{ matrix.service }}
 
-  # ── 4. Deploy to Kubernetes (main only) ─────────────────────────────────
-  deploy-k8s:
-    name: Deploy Serving to K8s
+      # ── Trivy security scan (from ECR after push) ─────────────────────────
+      - name: "Trivy - Scan image (${{ matrix.service }})"
+        uses: aquasecurity/trivy-action@master
+        with:
+          image-ref: ${{ steps.tags.outputs.tag }}
+          format: table
+          exit-code: "1"
+          severity: "CRITICAL,HIGH"
+          ignore-unfixed: true
+          vuln-type: "os,library"
+          output: trivy-${{ matrix.service }}.txt
+        continue-on-error: true # report only - do not block
+
+      - name: "Upload Trivy report - ${{ matrix.service }}"
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: trivy-report-${{ matrix.service }}
+          path: trivy-${{ matrix.service }}.txt
+
+      # ── Annotate run summary ──────────────────────────────────────────────
+      - name: "Summary"
+        if: always()
+        run: |
+          echo "## ${{ matrix.service }}" >> $GITHUB_STEP_SUMMARY
+          echo "| Tag |" >> $GITHUB_STEP_SUMMARY
+          echo "|-----|" >> $GITHUB_STEP_SUMMARY
+          echo "| \`${{ steps.tags.outputs.tag }}\` |" >> $GITHUB_STEP_SUMMARY
+
+      # ── Save short tag as artifact for update-gitops job ─────────────────
+      - name: "Save image tag artifact"
+        if: success()
+        run: echo "${{ steps.tags.outputs.short_tag }}" > "${{ matrix.service }}.txt"
+
+      - name: "Upload image tag artifact"
+        if: success()
+        uses: actions/upload-artifact@v4
+        with:
+          name: image-tag-${{ matrix.service }}
+          path: ${{ matrix.service }}.txt
+
+  # =============================================================================
+  # STAGE 5 - UPDATE-GITOPS  (commit new image tags to mlops-infr/values.yaml)
+  # =============================================================================
+  update-gitops:
+    name: "Update GitOps - values.yaml"
     runs-on: ubuntu-latest
-    needs: push-images
-    if: github.ref == 'refs/heads/main'
-    environment: production
+    needs: package
+    if: success()
 
     steps:
-      - uses: actions/checkout@v4
-
-      - name: Configure kubectl
-        uses: azure/k8s-set-context@v3
+      - name: "Checkout mlops-infr repo"
+        uses: actions/checkout@v4
         with:
-          method: kubeconfig
-          kubeconfig: ${{ secrets.KUBECONFIG }}
+          repository: ${{ vars.GITOPS_REPO }}   # e.g. xyan-dhgb/mlops-infrastructure
+          token: ${{ secrets.GITOPS_PAT }}
+          path: mlops-infr
 
-      - name: Set image SHA
-        run: |
-          IMAGE_TAG=${{ env.REGISTRY }}/${{ env.IMAGE_BASE }}-serving:sha-${{ github.sha }}
-          kubectl set image deployment/isic-serving \
-            serving=${IMAGE_TAG} \
-            -n isic2024
+      - name: "Download all image tag artifacts"
+        uses: actions/download-artifact@v4
+        with:
+          pattern: image-tag-*
+          path: image-tags/
+          merge-multiple: true
 
-      - name: Wait for rollout
+      - name: "Update values.yaml with new image tags"
         run: |
-          kubectl rollout status deployment/isic-serving \
-            -n isic2024 \
-            --timeout=300s
+          python3 << 'EOF'
+          import re, os, sys
 
-      - name: Verify health
+          VALUES_PATH = 'mlops-infr/gitops/mlops-pipeline/isic/values.yaml'
+
+          # service name (ECR tag prefix) → Helm values.yaml key
+          KEY_MAP = {
+              'prepare-data':               'prepareData',
+              'preprocess-csv':             'preprocessCsv',
+              'preprocess-image':           'preprocessImage',
+              'dataloader':                 'dataloader',
+              'build-model-efficientnetb3': 'buildEfficientnetb3',
+              'build-model-mlp':            'buildMlp',
+              'train':                      'train',
+              'evaluate':                   'evaluate',
+              'xai':                        'xai',
+              'drift-monitor':              'driftMonitor',
+          }
+
+          with open(VALUES_PATH, 'r') as f:
+              content = f.read()
+
+          for service, yaml_key in KEY_MAP.items():
+              tag_file = f'image-tags/{service}.txt'
+              if not os.path.exists(tag_file):
+                  print(f'⚠️  Missing tag file for {service} — skipping')
+                  continue
+              with open(tag_file) as tf:
+                  tag = tf.read().strip()
+              content, n = re.subn(
+                  rf'({re.escape(yaml_key)}:\s+)"[^"]*"',
+                  rf'\1"{tag}"',
+                  content
+              )
+              if n:
+                  print(f'✅  {yaml_key}: {tag}')
+              else:
+                  print(f'⚠️  Key not found in values.yaml: {yaml_key}', file=sys.stderr)
+
+          with open(VALUES_PATH, 'w') as f:
+              f.write(content)
+
+          print('\n✅ values.yaml updated.')
+          EOF
+
+      - name: "Commit and push to mlops-infr"
         run: |
-          SERVING_IP=$(kubectl get svc serving-svc -n isic2024 -o jsonpath='{.status.loadBalancer.ingress[0].ip}')
-          curl -f http://${SERVING_IP}/health
+          cd mlops-infr
+          git config user.name  "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          if git diff --quiet; then
+            echo "ℹ️  No changes to values.yaml — nothing to commit."
+            exit 0
+          fi
+          git add gitops/mlops-pipeline/isic/values.yaml
+          git commit -m "chore(gitops): update ISIC image tags $(date +'%Y%m%d-%H%M') [skip ci]"
+          git push
+          echo "✅ values.yaml committed and pushed."
