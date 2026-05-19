@@ -44,11 +44,13 @@ RUN pip install --no-cache-dir \
     PyYAML>=6.0 \
     matplotlib>=3.7.0 \
     seaborn>=0.13.0 \
-    scikit-image>=0.21.0
+    scikit-image>=0.21.0 \
+    prometheus_client>=0.17.0
 
 COPY Multimodal/training/train.py .
 COPY Multimodal/training/augment.py .
 COPY Multimodal/s3_utils.py .
+COPY Multimodal/ml_metrics.py .
 
 ENV PROCESSED_DIR=/data/processed
 ENV SPLITS_DIR=/data/splits

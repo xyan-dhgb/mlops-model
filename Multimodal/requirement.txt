@@ -44,3 +44,6 @@ seaborn>=0.13.0
 # Utilities
 tqdm>=4.65.0
 requests>=2.31.0
+
+# Monitoring
+prometheus_client>=0.17.0
