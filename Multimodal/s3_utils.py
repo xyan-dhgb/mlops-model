@@ -171,12 +171,12 @@ def load_keras_model(s3_key: str, bucket: str = S3_OUTPUT_BUCKET,
 
     # Monkey-patch __init__ of BatchNormalization to ignore Keras 2 kwargs.
     original_bn_init = tf.keras.layers.BatchNormalization.__init__
-    
+
     def patched_bn_init(self, **kwargs):
         for k in ("renorm", "renorm_clipping", "renorm_momentum"):
             kwargs.pop(k, None)
         original_bn_init(self, **kwargs)
-        
+
     tf.keras.layers.BatchNormalization.__init__ = patched_bn_init
 
     with tempfile.NamedTemporaryFile(suffix=".h5", delete=False) as tmp:
@@ -186,6 +186,6 @@ def load_keras_model(s3_key: str, bucket: str = S3_OUTPUT_BUCKET,
         finally:
             # Restore the original __init__ just to be safe
             tf.keras.layers.BatchNormalization.__init__ = original_bn_init
-            
+
     os.unlink(tmp.name)
     return model
