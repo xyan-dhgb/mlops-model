@@ -163,24 +163,29 @@ def load_keras_model(s3_key: str, bucket: str = S3_OUTPUT_BUCKET,
                      custom_objects=None):
     """Load model Keras (.h5) từ S3.
 
-    Tự động inject _Keras2BatchNorm shim để .h5 được save bằng Keras 2
+    Tự động monkey-patch BatchNormalization để .h5 được save bằng Keras 2
     (có renorm/renorm_clipping/renorm_momentum trong config) có thể load
     được bằng Keras 3 mà không bị ValueError.
     """
     import tensorflow as tf  # chỉ container có TF mới gọi hàm này
 
-    class _Keras2BatchNorm(tf.keras.layers.BatchNormalization):
-        """Compatibility shim: silently drops Keras-2-only kwargs."""
-        def __init__(self, **kwargs):
-            for k in ("renorm", "renorm_clipping", "renorm_momentum"):
-                kwargs.pop(k, None)
-            super().__init__(**kwargs)
+    # Monkey-patch __init__ of BatchNormalization to ignore Keras 2 kwargs.
+    original_bn_init = tf.keras.layers.BatchNormalization.__init__
+    
+    def patched_bn_init(self, **kwargs):
+        for k in ("renorm", "renorm_clipping", "renorm_momentum"):
+            kwargs.pop(k, None)
+        original_bn_init(self, **kwargs)
+        
+    tf.keras.layers.BatchNormalization.__init__ = patched_bn_init
 
-    merged = {"BatchNormalization": _Keras2BatchNorm}
-    if custom_objects:
-        merged.update(custom_objects)
     with tempfile.NamedTemporaryFile(suffix=".h5", delete=False) as tmp:
         download_file(s3_key, tmp.name, bucket)
-        model = tf.keras.models.load_model(tmp.name, custom_objects=merged)
+        try:
+            model = tf.keras.models.load_model(tmp.name, custom_objects=custom_objects)
+        finally:
+            # Restore the original __init__ just to be safe
+            tf.keras.layers.BatchNormalization.__init__ = original_bn_init
+            
     os.unlink(tmp.name)
     return model
