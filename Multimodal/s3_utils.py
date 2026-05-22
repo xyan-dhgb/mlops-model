@@ -164,10 +164,12 @@ def _patch_h5_config_for_tfkeras(h5_path: str) -> str:
     đã save bằng Keras 3.
 
     Keras 3 thêm các trường mà tf_keras không nhận dạng:
-      - InputLayer.config['batch_shape']  → đổi thành 'batch_input_shape'
-      - InputLayer.config['optional']     → bỏ đi
-      - Dense/layer.config['quantization_config'] → bỏ đi
-      - BatchNormalization.config renorm* → bỏ đi
+      - InputLayer.config['batch_shape']    → đổi thành 'batch_input_shape'
+      - InputLayer.config['optional']       → bỏ đi
+      - layer.config['quantization_config'] → bỏ đi
+      - BatchNormalization.config renorm*   → bỏ đi
+      - layer.config/dtype = DTypePolicy    → đổi thành string
+      - inbound_nodes dict (Keras 3)        → list (tf_keras)
 
     Trả về path file .h5 đã patch (file tạm mới).
     Nếu không cần patch, trả lại h5_path gốc.
@@ -187,6 +189,43 @@ def _patch_h5_config_for_tfkeras(h5_path: str) -> str:
 
     _BN_DROP  = {"renorm", "renorm_clipping", "renorm_momentum"}
     _ALL_DROP = {"quantization_config", "optional"}
+
+    def _k3_node_to_k2(node):
+        """Chuyển Keras 3 inbound_node dict → tf_keras list.
+
+        Keras 3: {"args": [{"class_name": "__keras_tensor__",
+                             "config": {"keras_history": ["layer", 0, 0], ...}}],
+                  "kwargs": {}}
+        tf_keras: [["layer_name", node_index, tensor_index, {}]]
+
+        tf_keras's process_node gọi tf.nest.flatten(node_data) rồi .as_list()
+        trên từng phần tử — nếu node_data là dict Keras 3, flatten trả về
+        các string key ("args", "kwargs") → AttributeError: 'str'.as_list().
+        """
+        if not (isinstance(node, dict) and "args" in node):
+            return node, False
+
+        connections = []
+
+        def _gather(obj):
+            """Thu thập (layer_name, node_idx, tensor_idx) từ keras_history."""
+            if isinstance(obj, dict):
+                hist = obj.get("config", {}).get("keras_history")
+                if isinstance(hist, (list, tuple)) and len(hist) >= 3:
+                    connections.append([str(hist[0]), int(hist[1]), int(hist[2]), {}])
+                    return  # không đệ quy sâu hơn khi đã lấy được history
+                for v in obj.values():
+                    _gather(v)
+            elif isinstance(obj, list):
+                for item in obj:
+                    _gather(item)
+
+        for arg in node.get("args", []):
+            _gather(arg)
+
+        # connections = [["layer_name", node_idx, tensor_idx, {}], ...]
+        # → đúng định dạng tf_keras cho một node
+        return (connections, True) if connections else (node, False)
 
     def _fix(obj):
         """Đệ quy qua toàn bộ config JSON và patch các trường không tương thích."""
@@ -229,8 +268,24 @@ def _patch_h5_config_for_tfkeras(h5_path: str) -> str:
                         target["dtype"] = name
                         changed[0] = True
 
-            for v in obj.values():
-                _fix(v)
+            # inbound_nodes: Keras 3 lưu dưới dạng dict mới, tf_keras cần list cũ.
+            # Keras 3: [{"args": [<keras_tensor_spec>], "kwargs": {}}]
+            # tf_keras: [["layer_name", node_idx, tensor_idx, {}]]
+            if "inbound_nodes" in obj and isinstance(obj["inbound_nodes"], list):
+                new_nodes, node_changed = [], False
+                for n in obj["inbound_nodes"]:
+                    conv, was_changed = _k3_node_to_k2(n)
+                    new_nodes.append(conv)
+                    node_changed = node_changed or was_changed
+                if node_changed:
+                    obj["inbound_nodes"] = new_nodes
+                    changed[0] = True
+
+            # Đệ quy vào các giá trị còn lại (KHÔNG đệ quy vào inbound_nodes
+            # đã được xử lý ở trên để tránh xử lý trùng)
+            for k, v in obj.items():
+                if k != "inbound_nodes":
+                    _fix(v)
         elif isinstance(obj, list):
             for item in obj:
                 _fix(item)
