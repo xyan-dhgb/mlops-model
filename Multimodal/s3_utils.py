@@ -163,13 +163,14 @@ def load_keras_model(s3_key: str, bucket: str = S3_OUTPUT_BUCKET,
                      custom_objects=None):
     """Load model Keras (.h5) từ S3.
 
-    Tự động monkey-patch BatchNormalization để .h5 được save bằng Keras 2
-    (có renorm/renorm_clipping/renorm_momentum trong config) có thể load
-    được bằng Keras 3 mà không bị ValueError.
+    Tự động monkey-patch các layer để .h5 được save bằng Keras 2 có thể
+    load được bằng Keras 3 mà không bị ValueError / TypeError:
+      - BatchNormalization: bỏ renorm/renorm_clipping/renorm_momentum
+      - Dense: bỏ quantization_config
     """
     import tensorflow as tf  # chỉ container có TF mới gọi hàm này
 
-    # Monkey-patch __init__ of BatchNormalization to ignore Keras 2 kwargs.
+    # ── Monkey-patch BatchNormalization ──────────────────────────────────
     original_bn_init = tf.keras.layers.BatchNormalization.__init__
 
     def patched_bn_init(self, **kwargs):
@@ -179,13 +180,23 @@ def load_keras_model(s3_key: str, bucket: str = S3_OUTPUT_BUCKET,
 
     tf.keras.layers.BatchNormalization.__init__ = patched_bn_init
 
+    # ── Monkey-patch Dense (Keras 2 lưu quantization_config=None) ────────
+    original_dense_init = tf.keras.layers.Dense.__init__
+
+    def patched_dense_init(self, *args, **kwargs):
+        kwargs.pop("quantization_config", None)
+        original_dense_init(self, *args, **kwargs)
+
+    tf.keras.layers.Dense.__init__ = patched_dense_init
+
     with tempfile.NamedTemporaryFile(suffix=".h5", delete=False) as tmp:
         download_file(s3_key, tmp.name, bucket)
         try:
             model = tf.keras.models.load_model(tmp.name, custom_objects=custom_objects)
         finally:
-            # Restore the original __init__ just to be safe
+            # Restore các __init__ gốc
             tf.keras.layers.BatchNormalization.__init__ = original_bn_init
+            tf.keras.layers.Dense.__init__ = original_dense_init
 
     os.unlink(tmp.name)
     return model

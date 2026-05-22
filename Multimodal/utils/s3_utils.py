@@ -94,14 +94,20 @@ def list_s3_keys(prefix: str, bucket: str = S3_OUTPUT_BUCKET) -> list[str]:
 
 # ── NumPy helpers ────────────────────────────────────────────────────────
 def save_npy(array: np.ndarray, s3_key: str, bucket: str = S3_OUTPUT_BUCKET):
-    buf = io.BytesIO()
-    np.save(buf, array)
-    upload_bytes(buf.getvalue(), s3_key, bucket)
+    import tempfile
+    with tempfile.NamedTemporaryFile(suffix=".npy", delete=False) as tmp:
+        np.save(tmp.name, array)
+        upload_file(tmp.name, s3_key, bucket)
+    os.unlink(tmp.name)
 
 
 def load_npy(s3_key: str, bucket: str = S3_OUTPUT_BUCKET) -> np.ndarray:
-    data = download_bytes(s3_key, bucket)
-    return np.load(io.BytesIO(data), allow_pickle=False)
+    import tempfile
+    with tempfile.NamedTemporaryFile(suffix=".npy", delete=False) as tmp:
+        download_file(s3_key, tmp.name, bucket)
+        array = np.load(tmp.name, allow_pickle=False)
+    os.unlink(tmp.name)
+    return array
 
 
 # ── Pickle helpers ───────────────────────────────────────────────────────
@@ -146,6 +152,7 @@ def load_png(s3_key: str, bucket: str = S3_OUTPUT_BUCKET) -> np.ndarray:
 # ── Keras model helpers ──────────────────────────────────────────────────
 def save_keras_model(model, s3_key: str, bucket: str = S3_OUTPUT_BUCKET):
     """Lưu model Keras (.h5) lên S3 qua file tạm."""
+    import tensorflow as tf  # lazy — chỉ container có TF mới gọi hàm này
     with tempfile.NamedTemporaryFile(suffix=".h5", delete=False) as tmp:
         model.save(tmp.name)
         upload_file(tmp.name, s3_key, bucket)
@@ -154,10 +161,42 @@ def save_keras_model(model, s3_key: str, bucket: str = S3_OUTPUT_BUCKET):
 
 def load_keras_model(s3_key: str, bucket: str = S3_OUTPUT_BUCKET,
                      custom_objects=None):
-    import tensorflow as tf
+    """Load model Keras (.h5) từ S3.
+
+    Tự động monkey-patch các layer để .h5 được save bằng Keras 2 có thể
+    load được bằng Keras 3 mà không bị ValueError / TypeError:
+      - BatchNormalization: bỏ renorm/renorm_clipping/renorm_momentum
+      - Dense: bỏ quantization_config
+    """
+    import tensorflow as tf  # chỉ container có TF mới gọi hàm này
+
+    # ── Monkey-patch BatchNormalization ──────────────────────────────────
+    original_bn_init = tf.keras.layers.BatchNormalization.__init__
+
+    def patched_bn_init(self, **kwargs):
+        for k in ("renorm", "renorm_clipping", "renorm_momentum"):
+            kwargs.pop(k, None)
+        original_bn_init(self, **kwargs)
+
+    tf.keras.layers.BatchNormalization.__init__ = patched_bn_init
+
+    # ── Monkey-patch Dense (Keras 2 lưu quantization_config=None) ────────
+    original_dense_init = tf.keras.layers.Dense.__init__
+
+    def patched_dense_init(self, *args, **kwargs):
+        kwargs.pop("quantization_config", None)
+        original_dense_init(self, *args, **kwargs)
+
+    tf.keras.layers.Dense.__init__ = patched_dense_init
+
     with tempfile.NamedTemporaryFile(suffix=".h5", delete=False) as tmp:
         download_file(s3_key, tmp.name, bucket)
-        model = tf.keras.models.load_model(tmp.name,
-                                           custom_objects=custom_objects)
+        try:
+            model = tf.keras.models.load_model(tmp.name, custom_objects=custom_objects)
+        finally:
+            # Restore các __init__ gốc
+            tf.keras.layers.BatchNormalization.__init__ = original_bn_init
+            tf.keras.layers.Dense.__init__ = original_dense_init
+
     os.unlink(tmp.name)
     return model
