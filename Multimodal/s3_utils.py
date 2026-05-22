@@ -159,54 +159,128 @@ def save_keras_model(model, s3_key: str, bucket: str = S3_OUTPUT_BUCKET):
     os.unlink(tmp.name)
 
 
-def _get_legacy_load_model():
-    """Trả về hàm load_model tương thích Keras 2 (legacy).
+def _patch_h5_config_for_tfkeras(h5_path: str) -> str:
+    """Patch model_config JSON trong .h5 để tf_keras (Keras 2) load được model
+    đã save bằng Keras 3.
 
-    TF 2.16+ mặc định dùng Keras 3 — format .h5 từ Keras 2/3 có nhiều
-    thay đổi serialization không tương thích (quantization_config, renorm,
-    functional_from_config get_tensor args, ...).
+    Keras 3 thêm các trường mà tf_keras không nhận dạng:
+      - InputLayer.config['batch_shape']  → đổi thành 'batch_input_shape'
+      - InputLayer.config['optional']     → bỏ đi
+      - Dense/layer.config['quantization_config'] → bỏ đi
+      - BatchNormalization.config renorm* → bỏ đi
 
-    Thứ tự ưu tiên:
-      1. tf_keras (package độc lập, hoàn toàn Keras 2 API)
-      2. tf.keras với TF_USE_LEGACY_KERAS=1 (buộc TF 2.16 dùng tf_keras nội bộ)
-      3. tf.keras native (Keras 3 — fallback cuối)
+    Trả về path file .h5 đã patch (file tạm mới).
+    Nếu không cần patch, trả lại h5_path gốc.
     """
-    # Cách 1: dùng tf_keras nếu đã cài (pip install tf_keras)
-    try:
-        import tf_keras
-        print("  [load_keras_model] Dùng tf_keras (Keras 2 standalone)")
-        return tf_keras.models.load_model
-    except ImportError:
-        pass
+    import h5py
+    import json
+    import shutil
 
-    # Cách 2: tf.keras — kiểm tra xem TF_USE_LEGACY_KERAS có bật không
-    import tensorflow as tf
-    keras_version = getattr(tf.keras, "__version__", "")
-    # Nếu keras version bắt đầu bằng "2." → đang dùng legacy, OK
-    if keras_version.startswith("2."):
-        print(f"  [load_keras_model] Dùng tf.keras (legacy Keras {keras_version})")
-        return tf.keras.models.load_model
+    with h5py.File(h5_path, "r") as f:
+        raw = f.attrs.get("model_config")
+        if raw is None:
+            return h5_path  # không có config → bỏ qua
+        config_str = raw.decode("utf-8") if isinstance(raw, bytes) else raw
 
-    # Cách 3: Keras 3 — dùng native nhưng cảnh báo
-    print(f"  [load_keras_model] CẢNH BÁO: Đang dùng Keras {keras_version} (Keras 3). "
-          f"Nếu lỗi, hãy cài `tf_keras` hoặc set TF_USE_LEGACY_KERAS=1")
-    return tf.keras.models.load_model
+    config = json.loads(config_str)
+    changed = [False]
+
+    _BN_DROP  = {"renorm", "renorm_clipping", "renorm_momentum"}
+    _ALL_DROP = {"quantization_config", "optional"}
+
+    def _fix(obj):
+        if isinstance(obj, dict):
+            cls = obj.get("class_name", "")
+            cfg = obj.get("config", {})
+
+            if cls == "InputLayer":
+                # batch_shape (Keras 3) → batch_input_shape (tf_keras)
+                if "batch_shape" in cfg and "batch_input_shape" not in cfg:
+                    cfg["batch_input_shape"] = cfg.pop("batch_shape")
+                    changed[0] = True
+                # optional — không tồn tại trong tf_keras
+                if cfg.pop("optional", None) is not None:
+                    changed[0] = True
+
+            if cls == "BatchNormalization":
+                for k in list(cfg.keys()):
+                    if k in _BN_DROP:
+                        del cfg[k]
+                        changed[0] = True
+
+            # quantization_config xuất hiện ở mọi layer (Dense, v.v.)
+            if "quantization_config" in cfg:
+                del cfg["quantization_config"]
+                changed[0] = True
+
+            for v in obj.values():
+                _fix(v)
+        elif isinstance(obj, list):
+            for item in obj:
+                _fix(item)
+
+    _fix(config)
+
+    if not changed[0]:
+        print("  [load_keras_model] model_config không cần patch")
+        return h5_path
+
+    # Tạo file .h5 mới với config đã patch
+    patched_path = h5_path + ".patched.h5"
+    shutil.copy2(h5_path, patched_path)
+    with h5py.File(patched_path, "a") as f:
+        f.attrs["model_config"] = json.dumps(config).encode("utf-8")
+
+    print("  [load_keras_model] Đã patch model_config: "
+          "batch_shape→batch_input_shape, bỏ optional/quantization_config/renorm*")
+    return patched_path
 
 
 def load_keras_model(s3_key: str, bucket: str = S3_OUTPUT_BUCKET,
                      custom_objects=None):
     """Load model Keras (.h5) từ S3.
 
-    Xử lý triệt để vấn đề Keras 2 ↔ Keras 3:
-      - Ưu tiên dùng tf_keras (Keras 2 standalone) nếu đã cài
-      - Fallback về tf.keras (legacy hoặc Keras 3)
-      - Không monkey-patch — dùng đúng API version tương thích
+    Chiến lược load triệt để Keras 2 ↔ Keras 3:
+      1. Dùng tf_keras (Keras 2 standalone) nếu đã cài
+      2. Trước khi load, patch model_config JSON trong .h5 bằng h5py
+         để xử lý các trường Keras 3 không tương thích:
+           - InputLayer: batch_shape → batch_input_shape, bỏ optional
+           - Dense:      bỏ quantization_config
+           - BatchNorm:  bỏ renorm*, renorm_clipping, renorm_momentum
     """
-    load_model_fn = _get_legacy_load_model()
+    # Chọn loader: ưu tiên tf_keras (Keras 2)
+    load_model_fn = None
+    try:
+        import tf_keras
+        load_model_fn = tf_keras.models.load_model
+        print("  [load_keras_model] Dùng tf_keras (Keras 2 standalone)")
+    except ImportError:
+        import tensorflow as tf
+        load_model_fn = tf.keras.models.load_model
+        keras_ver = getattr(tf.keras, "__version__", "?")
+        print(f"  [load_keras_model] Dùng tf.keras v{keras_ver}")
 
+    # Download về disk
     with tempfile.NamedTemporaryFile(suffix=".h5", delete=False) as tmp:
-        download_file(s3_key, tmp.name, bucket)
-        model = load_model_fn(tmp.name, custom_objects=custom_objects)
+        orig_path = tmp.name
+    download_file(s3_key, orig_path, bucket)
 
-    os.unlink(tmp.name)
+    # Patch config JSON trong .h5 cho tương thích tf_keras
+    patched_path = _patch_h5_config_for_tfkeras(orig_path)
+
+    try:
+        model = load_model_fn(patched_path, custom_objects=custom_objects)
+    finally:
+        _safe_unlink(orig_path)
+        if patched_path != orig_path:
+            _safe_unlink(patched_path)
+
     return model
+
+
+def _safe_unlink(path: str):
+    try:
+        os.unlink(path)
+    except OSError:
+        pass
+
