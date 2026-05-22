@@ -54,7 +54,7 @@ def compute_pauc(y_true, y_score, min_tpr=0.80):
     mask = tpr >= min_tpr
     if mask.sum() < 2:
         return 0.0
-    return float(np.trapezoid(tpr[mask], fpr[mask]) / (1.0 - min_tpr))
+    return float(getattr(np, "trapezoid", np.trapz)(tpr[mask], fpr[mask]) / (1.0 - min_tpr))
 
 
 def find_optimal_threshold(y_true, y_prob, min_recall=0.60):

@@ -164,10 +164,12 @@ def _patch_h5_config_for_tfkeras(h5_path: str) -> str:
     đã save bằng Keras 3.
 
     Keras 3 thêm các trường mà tf_keras không nhận dạng:
-      - InputLayer.config['batch_shape']  → đổi thành 'batch_input_shape'
-      - InputLayer.config['optional']     → bỏ đi
-      - Dense/layer.config['quantization_config'] → bỏ đi
-      - BatchNormalization.config renorm* → bỏ đi
+      - InputLayer.config['batch_shape']    → đổi thành 'batch_input_shape'
+      - InputLayer.config['optional']       → bỏ đi
+      - layer.config['quantization_config'] → bỏ đi
+      - BatchNormalization.config renorm*   → bỏ đi
+      - layer.config/dtype = DTypePolicy    → đổi thành string
+      - inbound_nodes dict (Keras 3)        → list (tf_keras)
 
     Trả về path file .h5 đã patch (file tạm mới).
     Nếu không cần patch, trả lại h5_path gốc.
@@ -188,7 +190,45 @@ def _patch_h5_config_for_tfkeras(h5_path: str) -> str:
     _BN_DROP  = {"renorm", "renorm_clipping", "renorm_momentum"}
     _ALL_DROP = {"quantization_config", "optional"}
 
+    def _k3_node_to_k2(node):
+        """Chuyển Keras 3 inbound_node dict → tf_keras list.
+
+        Keras 3: {"args": [{"class_name": "__keras_tensor__",
+                             "config": {"keras_history": ["layer", 0, 0], ...}}],
+                  "kwargs": {}}
+        tf_keras: [["layer_name", node_index, tensor_index, {}]]
+
+        tf_keras's process_node gọi tf.nest.flatten(node_data) rồi .as_list()
+        trên từng phần tử — nếu node_data là dict Keras 3, flatten trả về
+        các string key ("args", "kwargs") → AttributeError: 'str'.as_list().
+        """
+        if not (isinstance(node, dict) and "args" in node):
+            return node, False
+
+        connections = []
+
+        def _gather(obj):
+            """Thu thập (layer_name, node_idx, tensor_idx) từ keras_history."""
+            if isinstance(obj, dict):
+                hist = obj.get("config", {}).get("keras_history")
+                if isinstance(hist, (list, tuple)) and len(hist) >= 3:
+                    connections.append([str(hist[0]), int(hist[1]), int(hist[2]), {}])
+                    return  # không đệ quy sâu hơn khi đã lấy được history
+                for v in obj.values():
+                    _gather(v)
+            elif isinstance(obj, list):
+                for item in obj:
+                    _gather(item)
+
+        for arg in node.get("args", []):
+            _gather(arg)
+
+        # connections = [["layer_name", node_idx, tensor_idx, {}], ...]
+        # → đúng định dạng tf_keras cho một node
+        return (connections, True) if connections else (node, False)
+
     def _fix(obj):
+        """Đệ quy qua toàn bộ config JSON và patch các trường không tương thích."""
         if isinstance(obj, dict):
             cls = obj.get("class_name", "")
             cfg = obj.get("config", {})
@@ -213,26 +253,91 @@ def _patch_h5_config_for_tfkeras(h5_path: str) -> str:
                 del cfg["quantization_config"]
                 changed[0] = True
 
-            for v in obj.values():
-                _fix(v)
+            # dtype: Keras 3 lưu DTypePolicy dưới dạng dict,
+            # tf_keras chỉ hiểu dtype là string đơn giản ("float32").
+            # Ví dụ: {'class_name': 'DTypePolicy', 'config': {'name': 'float32'}, ...} → "float32"
+            #
+            # Patch ở CẢ HAI nơi:
+            #   • obj["config"]["dtype"] — các layer serialized dạng {class_name, config:{...}}
+            #   • obj["dtype"]           — Rescaling và các layer lưu dtype ở top-level dict
+            for target in (cfg, obj):
+                if isinstance(target, dict) and isinstance(target.get("dtype"), dict):
+                    dtype_obj = target["dtype"]
+                    if dtype_obj.get("class_name") == "DTypePolicy":
+                        name = dtype_obj.get("config", {}).get("name", "float32")
+                        target["dtype"] = name
+                        changed[0] = True
+
+            # inbound_nodes: Keras 3 lưu dưới dạng dict mới, tf_keras cần list cũ.
+            # Keras 3: [{"args": [<keras_tensor_spec>], "kwargs": {}}]
+            # tf_keras: [["layer_name", node_idx, tensor_idx, {}]]
+            if "inbound_nodes" in obj and isinstance(obj["inbound_nodes"], list):
+                new_nodes, node_changed = [], False
+                for n in obj["inbound_nodes"]:
+                    conv, was_changed = _k3_node_to_k2(n)
+                    new_nodes.append(conv)
+                    node_changed = node_changed or was_changed
+                if node_changed:
+                    obj["inbound_nodes"] = new_nodes
+                    changed[0] = True
+
+            # Đệ quy vào các giá trị còn lại (KHÔNG đệ quy vào inbound_nodes
+            # đã được xử lý ở trên để tránh xử lý trùng)
+            for k, v in obj.items():
+                if k != "inbound_nodes":
+                    _fix(v)
         elif isinstance(obj, list):
             for item in obj:
                 _fix(item)
 
     _fix(config)
 
-    if not changed[0]:
-        print("  [load_keras_model] model_config không cần patch")
-        return h5_path
-
-    # Tạo file .h5 mới với config đã patch
+    # Luôn tạo file patch để xử lý CẢ model_config lẫn training_config.
+    # KHÔNG early-return khi model_config không đổi — training_config vẫn cần patch.
     patched_path = h5_path + ".patched.h5"
     shutil.copy2(h5_path, patched_path)
-    with h5py.File(patched_path, "a") as f:
-        f.attrs["model_config"] = json.dumps(config).encode("utf-8")
 
-    print("  [load_keras_model] Đã patch model_config: "
-          "batch_shape→batch_input_shape, bỏ optional/quantization_config/renorm*")
+    # Các optimizer param Keras 3 mà tf_keras legacy optimizer không hỗ trợ.
+    _OPT_DROP = {
+        "weight_decay", "use_ema", "ema_momentum",
+        "ema_overwrite_frequency", "loss_scale_factor",
+        "gradient_accumulation_steps",
+    }
+
+    def _fix_opt(obj):
+        """Strip Keras-3-only optimizer kwargs ở bất kỳ độ sâu nào."""
+        if isinstance(obj, dict):
+            cfg_opt = obj.get("config", {})
+            if isinstance(cfg_opt, dict):
+                for bad_key in list(cfg_opt.keys()):
+                    if bad_key in _OPT_DROP:
+                        del cfg_opt[bad_key]
+            for v in obj.values():
+                _fix_opt(v)
+        elif isinstance(obj, list):
+            for item in obj:
+                _fix_opt(item)
+
+    with h5py.File(patched_path, "a") as f:
+        # Ghi model_config đã patch (dù không đổi vẫn ghi để nhất quán)
+        if changed[0]:
+            f.attrs["model_config"] = json.dumps(config).encode("utf-8")
+            print("  [load_keras_model] Đã patch model_config: "
+                  "batch_shape→batch_input_shape, DTypePolicy→str, "
+                  "inbound_nodes dict→list, bỏ optional/quantization/renorm*")
+        else:
+            print("  [load_keras_model] model_config không cần patch")
+
+        # Luôn patch training_config để strip optimizer params Keras 3
+        raw_tc = f.attrs.get("training_config")
+        if raw_tc is not None:
+            tc_str = raw_tc.decode("utf-8") if isinstance(raw_tc, bytes) else raw_tc
+            tc = json.loads(tc_str)
+            _fix_opt(tc)
+            f.attrs["training_config"] = json.dumps(tc).encode("utf-8")
+            print("  [load_keras_model] Đã patch training_config: "
+                  "bỏ optimizer params Keras 3 (weight_decay, use_ema, ...)")
+
     return patched_path
 
 
@@ -242,11 +347,15 @@ def load_keras_model(s3_key: str, bucket: str = S3_OUTPUT_BUCKET,
 
     Chiến lược load triệt để Keras 2 ↔ Keras 3:
       1. Dùng tf_keras (Keras 2 standalone) nếu đã cài
-      2. Trước khi load, patch model_config JSON trong .h5 bằng h5py
-         để xử lý các trường Keras 3 không tương thích:
-           - InputLayer: batch_shape → batch_input_shape, bỏ optional
-           - Dense:      bỏ quantization_config
-           - BatchNorm:  bỏ renorm*, renorm_clipping, renorm_momentum
+      2. Trước khi load, patch model_config và training_config trong .h5:
+           model_config  — xử lý các trường layer không tương thích:
+             - InputLayer: batch_shape → batch_input_shape, bỏ optional
+             - Dense:      bỏ quantization_config
+             - BatchNorm:  bỏ renorm*
+             - Mọi layer: DTypePolicy → string, inbound_nodes dict → list
+           training_config — strip optimizer params Keras 3 (weight_decay, v.v.)
+      3. compile=False — bỏ qua hoàn toàn optimizer khi load
+           (optimizer không cần thiết cho evaluate / inference)
     """
     # Chọn loader: ưu tiên tf_keras (Keras 2)
     load_model_fn = None
@@ -269,7 +378,10 @@ def load_keras_model(s3_key: str, bucket: str = S3_OUTPUT_BUCKET,
     patched_path = _patch_h5_config_for_tfkeras(orig_path)
 
     try:
-        model = load_model_fn(patched_path, custom_objects=custom_objects)
+        # compile=False: bỏ qua optimizer — không cần cho evaluate/inference
+        # và tránh mọi lỗi tương thích optimizer Keras 3 còn sót.
+        model = load_model_fn(patched_path, custom_objects=custom_objects,
+                              compile=False)
     finally:
         _safe_unlink(orig_path)
         if patched_path != orig_path:
