@@ -93,14 +93,14 @@ def augment_image(img_array: np.ndarray,
     # ── Rotation ─────────────────────────────────────────────────────────────
     angle = np.random.uniform(-30, 30) if strong else np.random.uniform(-rotation_range, rotation_range)
     M = cv2.getRotationMatrix2D((w // 2, h // 2), angle, 1.0)
-    img_uint8 = cv2.warpAffine(img_uint8, M, (w, h), borderMode=cv2.BORDER_REFLECT)
+    img_uint8 = np.asarray(cv2.warpAffine(img_uint8, M, (w, h), borderMode=cv2.BORDER_REFLECT), dtype=np.uint8)
 
     # ── Flip (strong only) ────────────────────────────────────────────────────
     if strong:
         if np.random.rand() > 0.5:
-            img_uint8 = cv2.flip(img_uint8, 1)   # horizontal
+            img_uint8 = np.asarray(cv2.flip(img_uint8, 1), dtype=np.uint8)   # horizontal
         if np.random.rand() > 0.5:
-            img_uint8 = cv2.flip(img_uint8, 0)   # vertical
+            img_uint8 = np.asarray(cv2.flip(img_uint8, 0), dtype=np.uint8)   # vertical
 
     # ── Brightness ────────────────────────────────────────────────────────────
     factor = np.random.uniform(0.6, 1.4) if strong else np.random.uniform(*brightness_range)
@@ -172,12 +172,12 @@ def oversample_malignant(X_img: np.ndarray,
         new_imgs.append(aug_img)
         new_tabs.append(X_tab[src_idx])
 
-    new_imgs = np.array(new_imgs, dtype=np.float32)
-    new_tabs = np.array(new_tabs, dtype=np.float32)
+    new_imgs_arr = np.array(new_imgs, dtype=np.float32)
+    new_tabs_arr = np.array(new_tabs, dtype=np.float32)
     new_y    = np.ones(n_to_add, dtype=np.int32)
 
-    X_img_os = np.concatenate([X_img, new_imgs], axis=0)
-    X_tab_os = np.concatenate([X_tab, new_tabs], axis=0)
+    X_img_os = np.concatenate([X_img, new_imgs_arr], axis=0)
+    X_tab_os = np.concatenate([X_tab, new_tabs_arr], axis=0)
     y_os     = np.concatenate([y, new_y], axis=0)
 
     # Shuffle
@@ -244,7 +244,7 @@ def main():
     print(f"  X_tabular : {X_tabular.shape}")
     print(f"  X_images  : {X_images.shape}")
     print(f"  y_labels  : {y_labels.shape}  "
-          f"(Mal={int(y_labels.sum())}, Ben={int((y_labels==0).sum())})")
+          f"(Mal={int(y_labels.sum())}, Ben={int((y_labels == 0).sum())})")
     print(f"  Tỷ lệ Malignant: {np.mean(y_labels)*100:.2f}%")
 
     # Lưu features gốc
