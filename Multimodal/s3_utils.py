@@ -378,10 +378,10 @@ def load_keras_model(s3_key: str, bucket: str = S3_OUTPUT_BUCKET,
     patched_path = _patch_h5_config_for_tfkeras(orig_path)
 
     try:
+        # compile=False: bỏ qua optimizer — không cần cho evaluate/inference
+        # và tránh mọi lỗi tương thích optimizer Keras 3 còn sót.
         model = load_model_fn(patched_path, custom_objects=custom_objects,
-                              compile=False)  # compile=False: bỏ qua optimizer
-                                              # (không cần cho evaluate/inference,
-                                              #  tránh mọi lỗi tương thích optimizer)
+                              compile=False)
     finally:
         _safe_unlink(orig_path)
         if patched_path != orig_path:
