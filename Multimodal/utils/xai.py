@@ -114,7 +114,12 @@ def run_shap(model, X_tab_bg, X_img_bg, X_tab_test, X_img_test, feature_cols, pr
     save_npy(shap_vals, f"{prefix}shap_values.npy", bucket=S3_OUTPUT_BUCKET)
 
     # Waterfall plots (5 mẫu đầu)
-    expected_val = float(np.array(explainer.expected_value).ravel()[0])
+    # GradientExplainer không có .expected_value — tự tính bằng mean prediction
+    # trên background dataset (đây chính là định nghĩa của expected value trong SHAP)
+    bg_preds = model.predict(
+        {"image_input": X_img_bg, "tabular_input": X_tab_bg}, verbose=0
+    )
+    expected_val = float(bg_preds.mean())
     for i in range(min(5, len(X_tab_test))):
         exp = shap.Explanation(
             values=shap_vals[i],
