@@ -16,10 +16,14 @@ RUN pip install --no-cache-dir \
     Pillow==10.3.0 \
     h5py==3.11.0 \
     shap==0.45.1 \
-    tqdm==4.66.4
+    tqdm==4.66.4 \
+    tf_keras==2.16.0
 
 COPY Multimodal/utils/xai.py .
 COPY Multimodal/s3_utils.py .
+
+# Buộc TF 2.16 dùng Keras 2 (tf_keras) thay vì Keras 3
+ENV TF_USE_LEGACY_KERAS=1
 
 ENV PROCESSED_DIR=/data/processed
 ENV SPLITS_DIR=/data/splits
@@ -31,3 +35,4 @@ ENV NUM_SHAP_SAMPLES=100
 ENV SHAP_BACKGROUND=50
 
 CMD ["python", "xai.py"]
+

@@ -20,10 +20,15 @@ RUN pip install --no-cache-dir \
     Pillow==10.3.0 \
     h5py==3.11.0 \
     mlflow==2.13.0 \
-    tqdm==4.66.4
+    tqdm==4.66.4 \
+    tf_keras==2.16.0
 
 COPY Multimodal/training/evaluate.py .
 COPY Multimodal/s3_utils.py .
+
+# Buộc TF 2.16 dùng Keras 2 (tf_keras) thay vì Keras 3 — tránh mọi lỗi
+# serialization khi load .h5 (quantization_config, renorm, get_tensor args, ...)
+ENV TF_USE_LEGACY_KERAS=1
 
 ENV PROCESSED_DIR=/data/processed
 ENV SPLITS_DIR=/data/splits
@@ -31,3 +36,4 @@ ENV OUTPUT_DIR=/data/output
 ENV EVAL_DIR=/data/eval
 
 CMD ["python", "evaluate.py"]
+

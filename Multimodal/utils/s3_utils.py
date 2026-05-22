@@ -159,44 +159,54 @@ def save_keras_model(model, s3_key: str, bucket: str = S3_OUTPUT_BUCKET):
     os.unlink(tmp.name)
 
 
+def _get_legacy_load_model():
+    """Trả về hàm load_model tương thích Keras 2 (legacy).
+
+    TF 2.16+ mặc định dùng Keras 3 — format .h5 từ Keras 2/3 có nhiều
+    thay đổi serialization không tương thích (quantization_config, renorm,
+    functional_from_config get_tensor args, ...).
+
+    Thứ tự ưu tiên:
+      1. tf_keras (package độc lập, hoàn toàn Keras 2 API)
+      2. tf.keras với TF_USE_LEGACY_KERAS=1 (buộc TF 2.16 dùng tf_keras nội bộ)
+      3. tf.keras native (Keras 3 — fallback cuối)
+    """
+    # Cách 1: dùng tf_keras nếu đã cài (pip install tf_keras)
+    try:
+        import tf_keras
+        print("  [load_keras_model] Dùng tf_keras (Keras 2 standalone)")
+        return tf_keras.models.load_model
+    except ImportError:
+        pass
+
+    # Cách 2: tf.keras — kiểm tra xem TF_USE_LEGACY_KERAS có bật không
+    import tensorflow as tf
+    keras_version = getattr(tf.keras, "__version__", "")
+    # Nếu keras version bắt đầu bằng "2." → đang dùng legacy, OK
+    if keras_version.startswith("2."):
+        print(f"  [load_keras_model] Dùng tf.keras (legacy Keras {keras_version})")
+        return tf.keras.models.load_model
+
+    # Cách 3: Keras 3 — dùng native nhưng cảnh báo
+    print(f"  [load_keras_model] CẢNH BÁO: Đang dùng Keras {keras_version} (Keras 3). "
+          f"Nếu lỗi, hãy cài `tf_keras` hoặc set TF_USE_LEGACY_KERAS=1")
+    return tf.keras.models.load_model
+
+
 def load_keras_model(s3_key: str, bucket: str = S3_OUTPUT_BUCKET,
                      custom_objects=None):
     """Load model Keras (.h5) từ S3.
 
-    Tự động monkey-patch các layer để .h5 được save bằng Keras 2 có thể
-    load được bằng Keras 3 mà không bị ValueError / TypeError:
-      - BatchNormalization: bỏ renorm/renorm_clipping/renorm_momentum
-      - Dense: bỏ quantization_config
+    Xử lý triệt để vấn đề Keras 2 ↔ Keras 3:
+      - Ưu tiên dùng tf_keras (Keras 2 standalone) nếu đã cài
+      - Fallback về tf.keras (legacy hoặc Keras 3)
+      - Không monkey-patch — dùng đúng API version tương thích
     """
-    import tensorflow as tf  # chỉ container có TF mới gọi hàm này
-
-    # ── Monkey-patch BatchNormalization ──────────────────────────────────
-    original_bn_init = tf.keras.layers.BatchNormalization.__init__
-
-    def patched_bn_init(self, **kwargs):
-        for k in ("renorm", "renorm_clipping", "renorm_momentum"):
-            kwargs.pop(k, None)
-        original_bn_init(self, **kwargs)
-
-    tf.keras.layers.BatchNormalization.__init__ = patched_bn_init
-
-    # ── Monkey-patch Dense (Keras 2 lưu quantization_config=None) ────────
-    original_dense_init = tf.keras.layers.Dense.__init__
-
-    def patched_dense_init(self, *args, **kwargs):
-        kwargs.pop("quantization_config", None)
-        original_dense_init(self, *args, **kwargs)
-
-    tf.keras.layers.Dense.__init__ = patched_dense_init
+    load_model_fn = _get_legacy_load_model()
 
     with tempfile.NamedTemporaryFile(suffix=".h5", delete=False) as tmp:
         download_file(s3_key, tmp.name, bucket)
-        try:
-            model = tf.keras.models.load_model(tmp.name, custom_objects=custom_objects)
-        finally:
-            # Restore các __init__ gốc
-            tf.keras.layers.BatchNormalization.__init__ = original_bn_init
-            tf.keras.layers.Dense.__init__ = original_dense_init
+        model = load_model_fn(tmp.name, custom_objects=custom_objects)
 
     os.unlink(tmp.name)
     return model

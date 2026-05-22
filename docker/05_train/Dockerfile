@@ -45,12 +45,17 @@ RUN pip install --no-cache-dir \
     matplotlib>=3.7.0 \
     seaborn>=0.13.0 \
     scikit-image>=0.21.0 \
-    prometheus_client>=0.17.0
+    prometheus_client>=0.17.0 \
+    tf_keras==2.16.0
 
 COPY Multimodal/training/train.py .
 COPY Multimodal/training/augment.py .
 COPY Multimodal/s3_utils.py .
 COPY Multimodal/ml_metrics.py .
+
+# Buộc TF 2.16 dùng Keras 2 (tf_keras) — đảm bảo model .h5 được save
+# ở format Keras 2, tương thích với evaluate/xai steps.
+ENV TF_USE_LEGACY_KERAS=1
 
 ENV PROCESSED_DIR=/data/processed
 ENV SPLITS_DIR=/data/splits
