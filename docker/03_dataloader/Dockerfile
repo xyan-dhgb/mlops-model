@@ -8,7 +8,8 @@ RUN pip install --no-cache-dir --retries 5 --timeout 60 \
     pandas==2.2.2 \
     Pillow==10.3.0 \
     scikit-learn==1.5.0 \
-    tqdm==4.66.4
+    tqdm==4.66.4 \
+    opencv-python-headless>=4.8
 
 COPY Multimodal/data_loader/dataloader.py .
 COPY Multimodal/s3_utils.py .
