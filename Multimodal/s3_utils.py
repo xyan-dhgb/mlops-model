@@ -189,6 +189,7 @@ def _patch_h5_config_for_tfkeras(h5_path: str) -> str:
     _ALL_DROP = {"quantization_config", "optional"}
 
     def _fix(obj):
+        """Đệ quy qua toàn bộ config JSON và patch các trường không tương thích."""
         if isinstance(obj, dict):
             cls = obj.get("class_name", "")
             cfg = obj.get("config", {})
@@ -212,6 +213,21 @@ def _patch_h5_config_for_tfkeras(h5_path: str) -> str:
             if "quantization_config" in cfg:
                 del cfg["quantization_config"]
                 changed[0] = True
+
+            # dtype: Keras 3 lưu DTypePolicy dưới dạng dict,
+            # tf_keras chỉ hiểu dtype là string đơn giản ("float32").
+            # Ví dụ: {'class_name': 'DTypePolicy', 'config': {'name': 'float32'}, ...} → "float32"
+            #
+            # Patch ở CẢ HAI nơi:
+            #   • obj["config"]["dtype"] — các layer serialized dạng {class_name, config:{...}}
+            #   • obj["dtype"]           — Rescaling và các layer lưu dtype ở top-level dict
+            for target in (cfg, obj):
+                if isinstance(target, dict) and isinstance(target.get("dtype"), dict):
+                    dtype_obj = target["dtype"]
+                    if dtype_obj.get("class_name") == "DTypePolicy":
+                        name = dtype_obj.get("config", {}).get("name", "float32")
+                        target["dtype"] = name
+                        changed[0] = True
 
             for v in obj.values():
                 _fix(v)
