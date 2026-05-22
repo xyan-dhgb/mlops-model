@@ -292,18 +292,52 @@ def _patch_h5_config_for_tfkeras(h5_path: str) -> str:
 
     _fix(config)
 
-    if not changed[0]:
-        print("  [load_keras_model] model_config không cần patch")
-        return h5_path
-
-    # Tạo file .h5 mới với config đã patch
+    # Luôn tạo file patch để xử lý CẢ model_config lẫn training_config.
+    # KHÔNG early-return khi model_config không đổi — training_config vẫn cần patch.
     patched_path = h5_path + ".patched.h5"
     shutil.copy2(h5_path, patched_path)
-    with h5py.File(patched_path, "a") as f:
-        f.attrs["model_config"] = json.dumps(config).encode("utf-8")
 
-    print("  [load_keras_model] Đã patch model_config: "
-          "batch_shape→batch_input_shape, bỏ optional/quantization_config/renorm*")
+    # Các optimizer param Keras 3 mà tf_keras legacy optimizer không hỗ trợ.
+    _OPT_DROP = {
+        "weight_decay", "use_ema", "ema_momentum",
+        "ema_overwrite_frequency", "loss_scale_factor",
+        "gradient_accumulation_steps",
+    }
+
+    def _fix_opt(obj):
+        """Strip Keras-3-only optimizer kwargs ở bất kỳ độ sâu nào."""
+        if isinstance(obj, dict):
+            cfg_opt = obj.get("config", {})
+            if isinstance(cfg_opt, dict):
+                for bad_key in list(cfg_opt.keys()):
+                    if bad_key in _OPT_DROP:
+                        del cfg_opt[bad_key]
+            for v in obj.values():
+                _fix_opt(v)
+        elif isinstance(obj, list):
+            for item in obj:
+                _fix_opt(item)
+
+    with h5py.File(patched_path, "a") as f:
+        # Ghi model_config đã patch (dù không đổi vẫn ghi để nhất quán)
+        if changed[0]:
+            f.attrs["model_config"] = json.dumps(config).encode("utf-8")
+            print("  [load_keras_model] Đã patch model_config: "
+                  "batch_shape→batch_input_shape, DTypePolicy→str, "
+                  "inbound_nodes dict→list, bỏ optional/quantization/renorm*")
+        else:
+            print("  [load_keras_model] model_config không cần patch")
+
+        # Luôn patch training_config để strip optimizer params Keras 3
+        raw_tc = f.attrs.get("training_config")
+        if raw_tc is not None:
+            tc_str = raw_tc.decode("utf-8") if isinstance(raw_tc, bytes) else raw_tc
+            tc = json.loads(tc_str)
+            _fix_opt(tc)
+            f.attrs["training_config"] = json.dumps(tc).encode("utf-8")
+            print("  [load_keras_model] Đã patch training_config: "
+                  "bỏ optimizer params Keras 3 (weight_decay, use_ema, ...)")
+
     return patched_path
 
 
@@ -313,11 +347,15 @@ def load_keras_model(s3_key: str, bucket: str = S3_OUTPUT_BUCKET,
 
     Chiến lược load triệt để Keras 2 ↔ Keras 3:
       1. Dùng tf_keras (Keras 2 standalone) nếu đã cài
-      2. Trước khi load, patch model_config JSON trong .h5 bằng h5py
-         để xử lý các trường Keras 3 không tương thích:
-           - InputLayer: batch_shape → batch_input_shape, bỏ optional
-           - Dense:      bỏ quantization_config
-           - BatchNorm:  bỏ renorm*, renorm_clipping, renorm_momentum
+      2. Trước khi load, patch model_config và training_config trong .h5:
+           model_config  — xử lý các trường layer không tương thích:
+             - InputLayer: batch_shape → batch_input_shape, bỏ optional
+             - Dense:      bỏ quantization_config
+             - BatchNorm:  bỏ renorm*
+             - Mọi layer: DTypePolicy → string, inbound_nodes dict → list
+           training_config — strip optimizer params Keras 3 (weight_decay, v.v.)
+      3. compile=False — bỏ qua hoàn toàn optimizer khi load
+           (optimizer không cần thiết cho evaluate / inference)
     """
     # Chọn loader: ưu tiên tf_keras (Keras 2)
     load_model_fn = None
@@ -340,7 +378,10 @@ def load_keras_model(s3_key: str, bucket: str = S3_OUTPUT_BUCKET,
     patched_path = _patch_h5_config_for_tfkeras(orig_path)
 
     try:
-        model = load_model_fn(patched_path, custom_objects=custom_objects)
+        model = load_model_fn(patched_path, custom_objects=custom_objects,
+                              compile=False)  # compile=False: bỏ qua optimizer
+                                              # (không cần cho evaluate/inference,
+                                              #  tránh mọi lỗi tương thích optimizer)
     finally:
         _safe_unlink(orig_path)
         if patched_path != orig_path:
