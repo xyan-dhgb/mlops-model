@@ -7,7 +7,6 @@ RUN pip install --no-cache-dir \
     pandas==2.2.2 \
     scipy==1.13.0 \
     evidently==0.4.30 \
-    schedule==1.2.1 \
     boto3==1.34.0
 
 COPY Multimodal/drift_monitor/drift_monitor.py .

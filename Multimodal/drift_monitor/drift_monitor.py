@@ -26,12 +26,10 @@ import io
 import json
 import logging
 import os
-import time
 from datetime import datetime
 
 import numpy as np
 import pandas as pd
-import schedule
 from scipy.stats import ks_2samp, wasserstein_distance
 
 from s3_utils import (
@@ -496,15 +494,12 @@ def _try_evidently_dashboard(baseline: dict, feature_names: list,
 # ╚══════════════════════════════════════════════════════════════════════════╝
 
 def main():
-    log.info(f"Drift Monitor khởi động | Chu kỳ={CHECK_INTERVAL_H}h")
+    # Argo CronWorkflow tự schedule — container chạy 1 lần rồi exit.
+    log.info(f"Drift Monitor khởi động (single-run mode)")
     log.info(f"Bucket: s3://{S3_OUTPUT_BUCKET}/")
     log.info(f"PSI ngưỡng: WARNING≥{PSI_WARNING} | CRITICAL≥{PSI_THRESHOLD}")
     log.info(f"KS alpha={KS_ALPHA} | Pred rate delta={PRED_RATE_DELTA}")
     check_drift()
-    schedule.every(CHECK_INTERVAL_H).hours.do(check_drift)
-    while True:
-        schedule.run_pending()
-        time.sleep(60)
 
 
 if __name__ == "__main__":
