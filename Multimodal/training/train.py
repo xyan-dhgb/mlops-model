@@ -339,6 +339,24 @@ def download_splits() -> dict:
 
 
 # ── Main ─────────────────────────────────────────────────────────────────
+def setup_mlflow_experiment(experiment_name):
+    from mlflow.exceptions import MlflowException
+    try:
+        mlflow.set_experiment(experiment_name)
+    except MlflowException as e:
+        if "deleted" in str(e).lower():
+            print(f"  [!] Experiment '{experiment_name}' đã bị xóa (soft-deleted). Đang khôi phục...")
+            client = mlflow.tracking.MlflowClient()
+            exp = client.get_experiment_by_name(experiment_name)
+            if exp:
+                client.restore_experiment(exp.experiment_id)
+                mlflow.set_experiment(experiment_name)
+            else:
+                raise e
+        else:
+            raise e
+
+
 def main():
     try:
         MetricsServer.start()
@@ -361,7 +379,7 @@ def main():
         print("  → Tiến hành tải model từ S3 để đăng ký vào MLflow Registry...")
 
         mlflow.set_tracking_uri(MLFLOW_TRACKING_URI)
-        mlflow.set_experiment(MLFLOW_EXPERIMENT)
+        setup_mlflow_experiment(MLFLOW_EXPERIMENT)
 
         with tempfile.NamedTemporaryFile(suffix=".h5", delete=False) as tmp:
             local_model_path = tmp.name
@@ -390,7 +408,7 @@ def main():
 
     # ── Khởi tạo MLflow ─────────────────────────────────────────────────
     mlflow.set_tracking_uri(MLFLOW_TRACKING_URI)
-    mlflow.set_experiment(MLFLOW_EXPERIMENT)
+    setup_mlflow_experiment(MLFLOW_EXPERIMENT)
 
     gpus = setup_gpu()
 
