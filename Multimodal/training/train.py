@@ -532,13 +532,13 @@ def main():
         upload_file(best_local, KEY_PHASE2, bucket=S3_OUTPUT_BUCKET)
 
         # ── Đăng ký model vào MLflow Model Registry ──────────────────
-        print("\n[5/5] Đăng ký model vào MLflow Model Registry...")
+        print("\n[5/5] Đăng ký model vào MLflow Model Registry (bypass create_logged_model)...")
         artifact_path = "model"
-        mlflow.tensorflow.log_model(
-            model,
-            artifact_path=artifact_path,
-            registered_model_name=MLFLOW_MODEL_NAME,
-        )
+        
+        with tempfile.TemporaryDirectory(dir=TMP_DIR) as td:
+            local_model_dir = os.path.join(td, "model_dir")
+            mlflow.tensorflow.save_model(model, path=local_model_dir)
+            mlflow.log_artifacts(local_model_dir, artifact_path=artifact_path)
 
         model_uri = f"runs:/{run_id}/{artifact_path}"
         mv = mlflow.register_model(model_uri, MLFLOW_MODEL_NAME)
