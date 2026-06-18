@@ -397,9 +397,16 @@ def main():
             with tempfile.TemporaryDirectory() as td:
                 local_model_dir = os.path.join(td, "model_dir")
                 mlflow.tensorflow.save_model(model, path=local_model_dir)
-                mlflow.log_artifacts(local_model_dir, artifact_path=artifact_path)
+                
+                s3_base_key = f"mlflow_artifacts/{run_id}/{artifact_path}"
+                for root, dirs, files in os.walk(local_model_dir):
+                    for file in files:
+                        local_path = os.path.join(root, file)
+                        rel_path = os.path.relpath(local_path, local_model_dir)
+                        s3_key = f"{s3_base_key}/{rel_path}".replace("\\", "/")
+                        upload_file(local_path, s3_key, bucket=S3_OUTPUT_BUCKET)
 
-            model_uri = f"runs:/{run_id}/{artifact_path}"
+            model_uri = f"s3://{S3_OUTPUT_BUCKET}/{s3_base_key}"
             mv = mlflow.register_model(model_uri, MLFLOW_MODEL_NAME)
             print(f"  ✓ Registered: {MLFLOW_MODEL_NAME} v{mv.version}")
 
@@ -582,9 +589,16 @@ def main():
         with tempfile.TemporaryDirectory(dir=TMP_DIR) as td:
             local_model_dir = os.path.join(td, "model_dir")
             mlflow.tensorflow.save_model(model, path=local_model_dir)
-            mlflow.log_artifacts(local_model_dir, artifact_path=artifact_path)
+            
+            s3_base_key = f"mlflow_artifacts/{run_id}/{artifact_path}"
+            for root, dirs, files in os.walk(local_model_dir):
+                for file in files:
+                    local_path = os.path.join(root, file)
+                    rel_path = os.path.relpath(local_path, local_model_dir)
+                    s3_key = f"{s3_base_key}/{rel_path}".replace("\\", "/")
+                    upload_file(local_path, s3_key, bucket=S3_OUTPUT_BUCKET)
 
-        model_uri = f"runs:/{run_id}/{artifact_path}"
+        model_uri = f"s3://{S3_OUTPUT_BUCKET}/{s3_base_key}"
         mv = mlflow.register_model(model_uri, MLFLOW_MODEL_NAME)
         print(f"  ✓ Registered: {MLFLOW_MODEL_NAME} v{mv.version}")
 
