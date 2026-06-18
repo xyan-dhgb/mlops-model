@@ -358,8 +358,34 @@ def main():
         print(f"\n[SKIP] Cả 2 model đã tồn tại trên S3:")
         print(f"  ✓ s3://{S3_OUTPUT_BUCKET}/{KEY_PHASE1}")
         print(f"  ✓ s3://{S3_OUTPUT_BUCKET}/{KEY_PHASE2}")
-        print("  → Bỏ qua training, chuyển sang evaluate.")
-        # Exit 0 → Argo Workflows đánh dấu step là Succeeded
+        print("  → Tiến hành tải model từ S3 để đăng ký vào MLflow Registry...")
+
+        mlflow.set_tracking_uri(MLFLOW_TRACKING_URI)
+        mlflow.set_experiment(MLFLOW_EXPERIMENT)
+
+        with tempfile.NamedTemporaryFile(suffix=".h5", delete=False) as tmp:
+            local_model_path = tmp.name
+        
+        download_file(KEY_PHASE2, local_model_path, bucket=S3_OUTPUT_BUCKET)
+        
+        from tensorflow.keras.models import load_model
+        model = load_model(local_model_path, compile=False)
+        
+        with mlflow.start_run(run_name="register-existing-model") as run:
+            run_id = run.info.run_id
+            print("\nĐăng ký model vào MLflow Model Registry (bypass create_logged_model)...")
+            artifact_path = "model"
+            
+            with tempfile.TemporaryDirectory() as td:
+                local_model_dir = os.path.join(td, "model_dir")
+                mlflow.tensorflow.save_model(model, path=local_model_dir)
+                mlflow.log_artifacts(local_model_dir, artifact_path=artifact_path)
+
+            model_uri = f"runs:/{run_id}/{artifact_path}"
+            mv = mlflow.register_model(model_uri, MLFLOW_MODEL_NAME)
+            print(f"  ✓ Registered: {MLFLOW_MODEL_NAME} v{mv.version}")
+        
+        os.unlink(local_model_path)
         sys.exit(0)
 
     # ── Khởi tạo MLflow ─────────────────────────────────────────────────
@@ -534,7 +560,7 @@ def main():
         # ── Đăng ký model vào MLflow Model Registry ──────────────────
         print("\n[5/5] Đăng ký model vào MLflow Model Registry (bypass create_logged_model)...")
         artifact_path = "model"
-        
+
         with tempfile.TemporaryDirectory(dir=TMP_DIR) as td:
             local_model_dir = os.path.join(td, "model_dir")
             mlflow.tensorflow.save_model(model, path=local_model_dir)
