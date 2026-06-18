@@ -397,7 +397,7 @@ def main():
             with tempfile.TemporaryDirectory() as td:
                 local_model_dir = os.path.join(td, "model_dir")
                 mlflow.tensorflow.save_model(model, path=local_model_dir)
-                
+
                 s3_base_key = f"mlflow_artifacts/{run_id}/{artifact_path}"
                 for root, dirs, files in os.walk(local_model_dir):
                     for file in files:
@@ -589,7 +589,7 @@ def main():
         with tempfile.TemporaryDirectory(dir=TMP_DIR) as td:
             local_model_dir = os.path.join(td, "model_dir")
             mlflow.tensorflow.save_model(model, path=local_model_dir)
-            
+
             s3_base_key = f"mlflow_artifacts/{run_id}/{artifact_path}"
             for root, dirs, files in os.walk(local_model_dir):
                 for file in files:
