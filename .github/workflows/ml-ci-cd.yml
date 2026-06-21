@@ -10,6 +10,8 @@ name: "KLTN Multimodal - Packaging Pipeline"
 on:
   push:
     branches: [main]
+    paths:
+      - 'Multimodal/**'
   workflow_dispatch:
     inputs:
       force_push:
