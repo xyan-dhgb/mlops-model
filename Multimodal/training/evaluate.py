@@ -38,7 +38,6 @@ os.makedirs(os.path.join(DATA_DIR, "final"), exist_ok=True)
 os.makedirs(os.path.join(DATA_DIR, "preprocessed"), exist_ok=True)
 
 
-
 def focal_loss(gamma=2.0, alpha=0.25):
     def fn(y_true, y_pred):
         y_true  = tf.cast(y_true, tf.float32)
