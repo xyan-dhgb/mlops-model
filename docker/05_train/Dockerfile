@@ -8,7 +8,7 @@ WORKDIR /app
 # Cài đè thủ công trước để mlflow cài blinker mới không bị xung đột.
 RUN pip install --no-cache-dir --ignore-installed blinker
 RUN pip install --no-cache-dir \
-    boto3==1.34.131 \
+    dvc[s3]>=3.0.0 \
     numpy==1.26.4 \
     pandas==2.2.2 \
     scikit-learn==1.5.0 \
@@ -47,4 +47,5 @@ ENV PHASE1_LR=0.001
 ENV PHASE2_LR=0.0001
 ENV IMAGE_SIZE=224
 
+COPY .dvc/ .dvc/
 CMD ["python", "train.py"]

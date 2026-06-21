@@ -12,7 +12,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 RUN pip install --no-cache-dir --ignore-installed blinker
 
 RUN pip install --no-cache-dir \
-    boto3==1.34.131 \
+    dvc[s3]>=3.0.0 \
     numpy==1.26.4 \
     pandas==2.2.2 \
     scikit-learn==1.5.0 \
@@ -35,5 +35,6 @@ ENV SPLITS_DIR=/data/splits
 ENV OUTPUT_DIR=/data/output
 ENV EVAL_DIR=/data/eval
 
+COPY .dvc/ .dvc/
 CMD ["python", "evaluate.py"]
 

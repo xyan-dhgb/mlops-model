@@ -3,7 +3,7 @@ FROM python:3.10-slim
 WORKDIR /app
 
 RUN pip install --no-cache-dir --retries 5 --timeout 60 \
-    boto3==1.34.131 \
+    dvc[s3]>=3.0.0 \
     numpy==1.26.4 \
     pandas==2.2.2 \
     Pillow==10.3.0 \
@@ -19,4 +19,5 @@ ENV SPLITS_DIR=/data/splits
 ENV IMAGE_SIZE=224
 ENV RANDOM_SEED=42
 
+COPY .dvc/ .dvc/
 CMD ["python", "dataloader.py"]

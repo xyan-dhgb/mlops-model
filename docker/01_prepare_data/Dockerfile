@@ -3,7 +3,7 @@ FROM python:3.10-slim
 WORKDIR /app
 
 RUN pip install --no-cache-dir \
-    boto3==1.34.131 \
+    dvc[s3]>=3.0.0 \
     h5py==3.11.0 \
     pandas==2.2.2
 
@@ -19,4 +19,5 @@ ENV AWS_REGION=ap-southeast-1
 ENV S3_INPUT_BUCKET=kltn-isic-2024-challenge
 ENV S3_INPUT_PREFIX=isic-2024-challenge
 
+COPY .dvc/ .dvc/
 CMD ["python", "download_dataset.py"]

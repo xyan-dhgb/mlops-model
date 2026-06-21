@@ -7,7 +7,7 @@ RUN pip install --no-cache-dir \
     pandas==2.2.2 \
     scipy==1.13.0 \
     evidently==0.4.30 \
-    boto3==1.34.0
+    dvc[s3]>=3.0.0
 
 COPY Multimodal/drift_monitor/drift_monitor.py .
 COPY Multimodal/s3_utils.py .
@@ -19,4 +19,5 @@ ENV CHECK_INTERVAL_HOURS=24
 ENV PSI_THRESHOLD=0.25
 ENV KS_P_THRESHOLD=0.05
 
+COPY .dvc/ .dvc/
 CMD ["python", "drift_monitor.py"]
