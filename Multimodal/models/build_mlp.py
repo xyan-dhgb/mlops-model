@@ -11,7 +11,11 @@ import tensorflow as tf
 from tensorflow.keras.models import Model
 from tensorflow.keras.layers import Input, Dense, Dropout, BatchNormalization
 
-from s3_utils import load_pkl, upload_bytes, S3_OUTPUT_BUCKET
+import os
+import pickle
+
+DATA_DIR = os.environ.get("DATA_DIR", "/app/data")
+os.makedirs(os.path.join(DATA_DIR, "preprocessed"), exist_ok=True)
 
 
 def build_mlp_branch(tabular_dim: int) -> Model:
@@ -35,7 +39,8 @@ def build_mlp_branch(tabular_dim: int) -> Model:
 
 
 def main():
-    encoders     = load_pkl("preprocessed/encoders.pkl", bucket=S3_OUTPUT_BUCKET)
+    with open(os.path.join(DATA_DIR, "preprocessed/encoders.pkl"), "rb") as f:
+        encoders = pickle.load(f)
     feature_cols = encoders["feature_cols"]
     tabular_dim  = len(feature_cols)
     print(f"Tabular dimension: {tabular_dim} features")
@@ -43,11 +48,9 @@ def main():
     model = build_mlp_branch(tabular_dim)
     model.summary()
 
-    upload_bytes(
-        model.to_json().encode(),
-        "preprocessed/mlp_architecture.json",
-        bucket=S3_OUTPUT_BUCKET,
-    )
+    arch_path = os.path.join(DATA_DIR, "preprocessed/mlp_architecture.json")
+    with open(arch_path, "w", encoding="utf-8") as f:
+        f.write(model.to_json())
 
     meta = {
         "tabular_dim":   tabular_dim,
@@ -55,14 +58,12 @@ def main():
         "output_dim":    32,
         "total_params":  model.count_params(),
     }
-    upload_bytes(
-        json.dumps(meta, indent=2).encode(),
-        "preprocessed/mlp_meta.json",
-        bucket=S3_OUTPUT_BUCKET,
-    )
+    meta_path = os.path.join(DATA_DIR, "preprocessed/mlp_meta.json")
+    with open(meta_path, "w", encoding="utf-8") as f:
+        json.dump(meta, f, indent=2)
 
-    print(f"\nLưu → s3://{S3_OUTPUT_BUCKET}/preprocessed/mlp_architecture.json")
-    print(f"Lưu → s3://{S3_OUTPUT_BUCKET}/preprocessed/mlp_meta.json")
+    print(f"\nLưu → {arch_path}")
+    print(f"Lưu → {meta_path}")
     print("\nBước 4b hoàn thành!")
 
 

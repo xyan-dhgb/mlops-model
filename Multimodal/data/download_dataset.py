@@ -20,6 +20,9 @@ from s3_utils import (
     S3_INPUT_BUCKET, S3_INPUT_PREFIX, S3_OUTPUT_BUCKET,
 )
 
+DATA_DIR = os.environ.get("DATA_DIR", "/app/data/raw")
+os.makedirs(DATA_DIR, exist_ok=True)
+
 def main():
     print("=" * 60)
     print("BƯỚC 1: Kiểm tra dataset ISIC 2024 trên S3")
@@ -37,8 +40,11 @@ def main():
     print(f"  Benign    : {(df['target']==0).sum():,}")
     print(f"  Cột       : {list(df.columns)[:8]}...")
 
-    # Copy sang output bucket để các bước sau đọc từ một nơi thống nhất
-    upload_bytes(csv_bytes, "raw/metadata.csv", bucket=S3_OUTPUT_BUCKET)
+    # Copy sang output để các bước sau đọc từ một nơi thống nhất
+    csv_out_path = os.path.join(DATA_DIR, "metadata.csv")
+    with open(csv_out_path, "wb") as f:
+        f.write(csv_bytes)
+    print(f"  Đã lưu metadata.csv tại {csv_out_path}")
 
     # ── 2. Kiểm tra HDF5 (chỉ đọc header, không tải toàn bộ) ────────────
     hdf5_key = f"{S3_INPUT_PREFIX}/train-image.hdf5"
@@ -60,12 +66,10 @@ def main():
         "hdf5_size_gb": round(hdf5_size_gb, 3),
         "status": "ready",
     }
-    upload_bytes(
-        json.dumps(manifest, indent=2).encode(),
-        "raw/manifest.json",
-        bucket=S3_OUTPUT_BUCKET,
-    )
-    print(f"\n[3/3] Manifest lưu → s3://{S3_OUTPUT_BUCKET}/raw/manifest.json")
+    manifest_path = os.path.join(DATA_DIR, "manifest.json")
+    with open(manifest_path, "w", encoding="utf-8") as f:
+        json.dump(manifest, f, indent=2)
+    print(f"\n[3/3] Manifest lưu → {manifest_path}")
     print("\nBước 1 hoàn thành!")
 
 if __name__ == "__main__":

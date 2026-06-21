@@ -34,12 +34,15 @@ from tqdm import tqdm
 from sklearn.model_selection import train_test_split
 import cv2
 
-from s3_utils import (
-    load_csv, load_pkl, download_bytes,
-    save_npy, upload_bytes,
-    list_s3_keys, s3_key_exists,
-    S3_OUTPUT_BUCKET,
-)
+import pickle
+import pandas as pd
+
+DATA_DIR = os.environ.get("DATA_DIR", "/app/data")
+os.makedirs(os.path.join(DATA_DIR, "features"), exist_ok=True)
+os.makedirs(os.path.join(DATA_DIR, "splits/train"), exist_ok=True)
+os.makedirs(os.path.join(DATA_DIR, "splits/val"), exist_ok=True)
+os.makedirs(os.path.join(DATA_DIR, "splits/test"), exist_ok=True)
+
 
 RANDOM_SEED      = int(os.environ.get("RANDOM_SEED", "42"))
 IMAGE_SIZE       = int(os.environ.get("IMAGE_SIZE", "224"))
@@ -49,11 +52,10 @@ OVERSAMPLE_RATIO = float(os.environ.get("OVERSAMPLE_RATIO", "0.25"))   # target 
 # ── Image loading ─────────────────────────────────────────────────────────────
 
 def load_image_from_s3(isic_id: str) -> np.ndarray | None:
-    """Tải ảnh đã preprocessed từ S3, trả về float32 [H,W,3] / None nếu lỗi."""
-    key = f"preprocessed/images/{isic_id}.png"
+    """Tải ảnh đã preprocessed từ local, trả về float32 [H,W,3] / None nếu lỗi."""
+    path = os.path.join(DATA_DIR, f"preprocessed/images/{isic_id}.png")
     try:
-        data = download_bytes(key, bucket=S3_OUTPUT_BUCKET)
-        img  = Image.open(io.BytesIO(data)).convert("RGB")
+        img  = Image.open(path).convert("RGB")
         return np.array(img, dtype=np.float32) / 255.0
     except Exception:
         return None
@@ -197,23 +199,26 @@ def oversample_malignant(X_img: np.ndarray,
 def main():
     print("=" * 60)
     print("BƯỚC 3: Tạo features array + splits + oversampling → S3")
-    print(f"  Bucket          : s3://{S3_OUTPUT_BUCKET}/")
+    print(f"  Bucket          : {DATA_DIR}")
     print(f"  Oversample ratio: {OVERSAMPLE_RATIO}")
     print("=" * 60)
 
-    if s3_key_exists("splits/split_info.json", bucket=S3_OUTPUT_BUCKET):
-        print("\n Tìm thấy 'splits/split_info.json' trên S3.")
+    split_info_path = os.path.join(DATA_DIR, "splits/split_info.json")
+    if os.path.exists(split_info_path):
+        print(f"\n Tìm thấy '{split_info_path}'.")
         print("Dataloader đã chạy thành công trước đó. BỎ QUA (SKIPPED).")
         return
 
-    df       = load_csv("preprocessed/metadata_clean.csv", bucket=S3_OUTPUT_BUCKET)
-    encoders = load_pkl("preprocessed/encoders.pkl",       bucket=S3_OUTPUT_BUCKET)
+    df       = pd.read_csv(os.path.join(DATA_DIR, "preprocessed/metadata_clean.csv"))
+    with open(os.path.join(DATA_DIR, "preprocessed/encoders.pkl"), "rb") as f:
+        encoders = pickle.load(f)
     feature_cols = encoders["feature_cols"]
 
     # ── Kiểm tra ảnh có trên S3 ───────────────────────────────────────────────
-    print("\nKiểm tra ảnh đã preprocessed trên S3...")
-    existing_keys = list_s3_keys("preprocessed/images/", bucket=S3_OUTPUT_BUCKET)
-    existing_ids  = {k.split("/")[-1].replace(".png", "") for k in existing_keys}
+    print("\nKiểm tra ảnh đã preprocessed trên local...")
+    img_dir = os.path.join(DATA_DIR, "preprocessed/images")
+    existing_keys = os.listdir(img_dir) if os.path.exists(img_dir) else []
+    existing_ids  = {k.replace(".png", "") for k in existing_keys}
     df_available  = df[df["isic_id"].isin(existing_ids)].reset_index(drop=True)
     print(f"  Ảnh có sẵn: {len(existing_ids):,}")
     print(f"  Mẫu khớp  : {len(df_available):,}")
@@ -248,9 +253,9 @@ def main():
     print(f"  Tỷ lệ Malignant: {np.mean(y_labels)*100:.2f}%")
 
     # Lưu features gốc
-    save_npy(X_tabular, "features/X_tabular.npy", bucket=S3_OUTPUT_BUCKET)
-    save_npy(X_images,  "features/X_images.npy",  bucket=S3_OUTPUT_BUCKET)
-    save_npy(y_labels,  "features/y_labels.npy",  bucket=S3_OUTPUT_BUCKET)
+    np.save(os.path.join(DATA_DIR, "features/X_tabular.npy"), X_tabular)
+    np.save(os.path.join(DATA_DIR, "features/X_images.npy"), X_images)
+    np.save(os.path.join(DATA_DIR, "features/y_labels.npy"), y_labels)
 
     # ── Stratified split 64 / 16 / 20 ────────────────────────────────────────
     idx = np.arange(len(y_labels))
@@ -288,9 +293,9 @@ def main():
         xi = X_images[idx_s]
         ys = y_labels[idx_s]
 
-        save_npy(xs, f"{prefix}X_tab_{name}.npy", bucket=S3_OUTPUT_BUCKET)
-        save_npy(xi, f"{prefix}X_img_{name}.npy", bucket=S3_OUTPUT_BUCKET)
-        save_npy(ys, f"{prefix}y_{name}.npy",      bucket=S3_OUTPUT_BUCKET)
+        np.save(os.path.join(DATA_DIR, f"{prefix}X_tab_{name}.npy"), xs)
+        np.save(os.path.join(DATA_DIR, f"{prefix}X_img_{name}.npy"), xi)
+        np.save(os.path.join(DATA_DIR, f"{prefix}y_{name}.npy"), ys)
 
         split_info["splits"][name] = {
             "total":     int(len(ys)),
@@ -326,9 +331,9 @@ def main():
     )
 
     # Lưu tập train đã oversampled
-    save_npy(X_tab_train_os, "splits/train/X_tab_train_os.npy", bucket=S3_OUTPUT_BUCKET)
-    save_npy(X_img_train_os, "splits/train/X_img_train_os.npy", bucket=S3_OUTPUT_BUCKET)
-    save_npy(y_train_os,     "splits/train/y_train_os.npy",     bucket=S3_OUTPUT_BUCKET)
+    np.save(os.path.join(DATA_DIR, "splits/train/X_tab_train_os.npy"), X_tab_train_os)
+    np.save(os.path.join(DATA_DIR, "splits/train/X_img_train_os.npy"), X_img_train_os)
+    np.save(os.path.join(DATA_DIR, "splits/train/y_train_os.npy"), y_train_os)
 
     # Ghi thông tin oversampling vào split_info
     split_info["splits"]["train_os"] = {
@@ -352,12 +357,9 @@ def main():
     print(f"\n  Class weights (×1.2): {class_weight_dict}")
     print(f"  Lý do ×1.2: tránh triple-penalty bias (Focal + Oversample + ClassWeight)")
 
-    # ── Ghi split_info.json lên S3 ────────────────────────────────────────────
-    upload_bytes(
-        json.dumps(split_info, indent=2).encode(),
-        "splits/split_info.json",
-        bucket=S3_OUTPUT_BUCKET,
-    )
+    # ── Ghi split_info.json ────────────────────────────────────────────
+    with open(split_info_path, "w", encoding="utf-8") as f:
+        json.dump(split_info, f, indent=2)
 
     # ── Summary ───────────────────────────────────────────────────────────────
     print("\n" + "=" * 60)
@@ -367,7 +369,7 @@ def main():
     print(f"  train_os  : {len(y_train_os):>6,} mẫu  (sau oversampling {OVERSAMPLE_RATIO:.0%} Malignant)")
     print(f"  val       : {len(y_val):>6,} mẫu  (không oversample)")
     print(f"  test      : {len(y_test):>6,} mẫu  (không oversample)")
-    print(f"\n  Split info → s3://{S3_OUTPUT_BUCKET}/splits/split_info.json")
+    print(f"\n  Split info → {split_info_path}")
     print("\nBước 3 hoàn thành!")
 
 

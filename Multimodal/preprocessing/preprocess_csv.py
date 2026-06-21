@@ -22,8 +22,13 @@ from sklearn.preprocessing import LabelEncoder, StandardScaler
 from sklearn.impute import SimpleImputer
 
 from s3_utils import (
-    load_csv, save_csv, save_pkl, S3_OUTPUT_BUCKET,
+    S3_OUTPUT_BUCKET,
 )
+import pickle
+
+DATA_DIR = os.environ.get("DATA_DIR", "/app/data")
+os.makedirs(os.path.join(DATA_DIR, "preprocessed"), exist_ok=True)
+
 
 # Cột loại trừ — khớp notebook cell 32
 EXCLUDE_COLS = [
@@ -41,7 +46,7 @@ def main():
     print(f"  Bucket: s3://{S3_OUTPUT_BUCKET}/preprocessed/")
     print("=" * 60)
 
-    df = load_csv("raw/metadata.csv", bucket=S3_OUTPUT_BUCKET)
+    df = pd.read_csv(os.path.join(DATA_DIR, "raw/metadata.csv"))
     print(f"Shape gốc: {df.shape}")
 
     # 1. Chuẩn hóa tên cột (cell 19)
@@ -92,8 +97,8 @@ def main():
     scaler = StandardScaler()
     df[all_feature_cols] = scaler.fit_transform(df[all_feature_cols])
 
-    # 7. Lưu kết quả lên S3
-    save_csv(df, "preprocessed/metadata_clean.csv", bucket=S3_OUTPUT_BUCKET)
+    # 7. Lưu kết quả
+    df.to_csv(os.path.join(DATA_DIR, "preprocessed/metadata_clean.csv"), index=False)
 
     encoders_obj = {
         "scaler":         scaler,
@@ -101,12 +106,13 @@ def main():
         "imputer":        imputer,
         "feature_cols":   all_feature_cols,
     }
-    save_pkl(encoders_obj, "preprocessed/encoders.pkl", bucket=S3_OUTPUT_BUCKET)
+    with open(os.path.join(DATA_DIR, "preprocessed/encoders.pkl"), "wb") as f:
+        pickle.dump(encoders_obj, f)
 
     print(f"\nShape cuối: {df.shape}")
     print(f"Feature cols: {len(all_feature_cols)}")
-    print(f"Lưu → s3://{S3_OUTPUT_BUCKET}/preprocessed/metadata_clean.csv")
-    print(f"Lưu → s3://{S3_OUTPUT_BUCKET}/preprocessed/encoders.pkl")
+    print(f"Lưu → {DATA_DIR}/preprocessed/metadata_clean.csv")
+    print(f"Lưu → {DATA_DIR}/preprocessed/encoders.pkl")
     print("\nBước 2b hoàn thành!")
 
 

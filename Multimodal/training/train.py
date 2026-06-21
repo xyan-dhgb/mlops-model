@@ -43,17 +43,20 @@ import mlflow.tensorflow
 from mlflow.models.signature import infer_signature
 
 from augment import augment_image
-from s3_utils import (
-    download_file, load_pkl, save_pkl,
-    upload_bytes, upload_file,
-    s3_key_exists,
-    S3_OUTPUT_BUCKET,
-)
+from s3_utils import upload_file, S3_OUTPUT_BUCKET
+import pickle
+import pandas as pd
+import json
+
+DATA_DIR = os.environ.get("DATA_DIR", "/app/data")
+os.makedirs(os.path.join(DATA_DIR, "final"), exist_ok=True)
+os.makedirs(os.path.join(DATA_DIR, "preprocessed"), exist_ok=True)
 
 try:
     from ml_metrics import MetricsServer, record_epoch_metrics
 except ImportError:
     pass
+
 
 # ── Hyperparameters ──────────────────────────────────────────────────────
 PHASE1_EPOCHS    = int(os.environ.get("PHASE1_EPOCHS",        "20"))
@@ -318,24 +321,16 @@ def build_val_dataset(
     return ds, validation_steps
 
 
-# ── Download splits về disk ───────────────────────────────────────────────
-def download_splits() -> dict:
-    """Stream các file .npy từ S3 xuống disk — không đưa vào RAM."""
-    os.makedirs(TMP_DIR, exist_ok=True)
-    mapping = {
-        "X_img_train": ("splits/train/X_img_train.npy", f"{TMP_DIR}/X_img_train.npy"),
-        "X_tab_train": ("splits/train/X_tab_train.npy", f"{TMP_DIR}/X_tab_train.npy"),
-        "y_train":     ("splits/train/y_train.npy",     f"{TMP_DIR}/y_train.npy"),
-        "X_img_val":   ("splits/val/X_img_val.npy",     f"{TMP_DIR}/X_img_val.npy"),
-        "X_tab_val":   ("splits/val/X_tab_val.npy",     f"{TMP_DIR}/X_tab_val.npy"),
-        "y_val":       ("splits/val/y_val.npy",         f"{TMP_DIR}/y_val.npy"),
+# ── Paths ───────────────────────────────────────────────
+def get_split_paths() -> dict:
+    return {
+        "X_img_train": os.path.join(DATA_DIR, "splits/train/X_img_train.npy"),
+        "X_tab_train": os.path.join(DATA_DIR, "splits/train/X_tab_train.npy"),
+        "y_train":     os.path.join(DATA_DIR, "splits/train/y_train.npy"),
+        "X_img_val":   os.path.join(DATA_DIR, "splits/val/X_img_val.npy"),
+        "X_tab_val":   os.path.join(DATA_DIR, "splits/val/X_tab_val.npy"),
+        "y_val":       os.path.join(DATA_DIR, "splits/val/y_val.npy"),
     }
-    paths = {}
-    for key, (s3_key, local_path) in mapping.items():
-        print(f"  ↓ {s3_key} → {local_path}")
-        download_file(s3_key, local_path, bucket=S3_OUTPUT_BUCKET)
-        paths[key] = local_path
-    return paths
 
 
 # ── Main ─────────────────────────────────────────────────────────────────
@@ -368,23 +363,18 @@ def main():
     print(f"  Bucket: s3://{S3_OUTPUT_BUCKET}/preprocessed/")
     print("=" * 60)
 
-    # ── Skip nếu cả 2 model đã được train và upload lên S3 ──────────────
-    KEY_PHASE1 = "preprocessed/best_model_phase1.h5"
-    KEY_PHASE2 = "preprocessed/best_model_isic2024.h5"
-    if s3_key_exists(KEY_PHASE1, bucket=S3_OUTPUT_BUCKET) and \
-       s3_key_exists(KEY_PHASE2, bucket=S3_OUTPUT_BUCKET):
-        print(f"\n[SKIP] Cả 2 model đã tồn tại trên S3:")
-        print(f"  ✓ s3://{S3_OUTPUT_BUCKET}/{KEY_PHASE1}")
-        print(f"  ✓ s3://{S3_OUTPUT_BUCKET}/{KEY_PHASE2}")
+    KEY_PHASE1 = os.path.join(DATA_DIR, "final/best_model_phase1.h5")
+    KEY_PHASE2 = os.path.join(DATA_DIR, "final/best_model_isic2024.h5")
+    if os.path.exists(KEY_PHASE1) and os.path.exists(KEY_PHASE2):
+        print(f"\n[SKIP] Cả 2 model đã tồn tại trên disk:")
+        print(f"  ✓ {KEY_PHASE1}")
+        print(f"  ✓ {KEY_PHASE2}")
         print("  → Tiến hành tải model từ S3 để đăng ký vào MLflow Registry...")
 
         mlflow.set_tracking_uri(MLFLOW_TRACKING_URI)
         setup_mlflow_experiment(MLFLOW_EXPERIMENT)
 
-        with tempfile.NamedTemporaryFile(suffix=".h5", delete=False) as tmp:
-            local_model_path = tmp.name
-
-        download_file(KEY_PHASE2, local_model_path, bucket=S3_OUTPUT_BUCKET)
+        local_model_path = KEY_PHASE2
 
         from tensorflow.keras.models import load_model
         model = load_model(local_model_path, compile=False)
@@ -410,7 +400,6 @@ def main():
             mv = mlflow.register_model(model_uri, MLFLOW_MODEL_NAME)
             print(f"  ✓ Registered: {MLFLOW_MODEL_NAME} v{mv.version}")
 
-        os.unlink(local_model_path)
         sys.exit(0)
 
     # ── Khởi tạo MLflow ─────────────────────────────────────────────────
@@ -419,9 +408,9 @@ def main():
 
     gpus = setup_gpu()
 
-    # 1. Download về disk (không load vào RAM)
-    print("\n[1/5] Download splits về disk...")
-    paths = download_splits()
+    # 1. Lấy paths
+    print("\n[1/5] Kiểm tra splits trên disk...")
+    paths = get_split_paths()
 
     # 2. Mở qua memmap — X_img chỉ đọc từ disk khi cần
     print("\n[2/5] Load splits (memmap cho image arrays)...")
@@ -432,7 +421,8 @@ def main():
     X_tab_val   = np.load(paths["X_tab_val"])
     y_val       = np.load(paths["y_val"])
 
-    encoders    = load_pkl("preprocessed/encoders.pkl", bucket=S3_OUTPUT_BUCKET)
+    with open(os.path.join(DATA_DIR, "preprocessed/encoders.pkl"), "rb") as f:
+        encoders = pickle.load(f)
     tabular_dim = len(encoders["feature_cols"])
     print(f"  Train: {len(y_train):,} | Val: {len(y_val):,} | tabular_dim={tabular_dim}")
     print(f"  X_img_train: {X_img_train.shape}  dtype={X_img_train.dtype}  (memmap)")
@@ -447,11 +437,8 @@ def main():
     print("\n[3/5] Build model...")
     model, backbone = build_multimodal_model(tabular_dim, freeze_backbone=True)
     model = compile_model(model, PHASE1_LR)
-    upload_bytes(
-        model.to_json().encode(),
-        "preprocessed/model_architecture.json",
-        bucket=S3_OUTPUT_BUCKET,
-    )
+    with open(os.path.join(DATA_DIR, "final/model_architecture.json"), "w") as f:
+        f.write(model.to_json())
 
     # 5. Build tf.data datasets (oversampling online, không copy mảng)
     print("\n[4/5] Xây tf.data datasets...")
@@ -492,8 +479,7 @@ def main():
         print("PHASE 1: Frozen backbone")
         print("=" * 60)
 
-        with tempfile.NamedTemporaryFile(suffix=".h5", delete=False, dir=TMP_DIR) as tmp1:
-            phase1_local = tmp1.name
+        phase1_local = KEY_PHASE1
 
         cb1 = [
             EarlyStopping(monitor="val_auc", patience=5,
@@ -521,9 +507,6 @@ def main():
         best_p1_auc = max(h1.history.get("val_auc", [0.0]))
         mlflow.log_metric("phase1/best_val_auc", best_p1_auc)
 
-        upload_file(phase1_local, KEY_PHASE1, bucket=S3_OUTPUT_BUCKET)
-        os.unlink(phase1_local)
-
         # ── PHASE 2: Unfreeze backbone ───────────────────────────────
         print("\n" + "=" * 60)
         print(f"PHASE 2: Fine-tune EfficientNetB3 từ layer {FINE_TUNE_FROM}")
@@ -546,8 +529,7 @@ def main():
             X_img_val, X_tab_val, y_val, tabular_dim, batch_size=PHASE2_BATCH,
         )
 
-        with tempfile.NamedTemporaryFile(suffix=".h5", delete=False, dir=TMP_DIR) as tmp2:
-            best_local = tmp2.name
+        best_local = KEY_PHASE2
 
         cb2 = [
             EarlyStopping(monitor="val_auc", patience=7,
@@ -579,9 +561,6 @@ def main():
         mlflow.log_metric("phase2/best_val_recall",    best_p2_recall)
         mlflow.log_metric("phase2/best_val_precision", best_p2_prec)
 
-        # Upload model tốt nhất (phase 2) lên S3
-        upload_file(best_local, KEY_PHASE2, bucket=S3_OUTPUT_BUCKET)
-
         # ── Đăng ký model vào MLflow Model Registry ──────────────────
         print("\n[5/5] Đăng ký model vào MLflow Model Registry (bypass create_logged_model)...")
         artifact_path = "model"
@@ -598,7 +577,7 @@ def main():
                     s3_key = f"{s3_base_key}/{rel_path}".replace("\\", "/")
                     upload_file(local_path, s3_key, bucket=S3_OUTPUT_BUCKET)
 
-        model_uri = f"s3://{S3_OUTPUT_BUCKET}/{s3_base_key}"
+        model_uri = f"runs:/{run_id}/{artifact_path}"
         mv = mlflow.register_model(model_uri, MLFLOW_MODEL_NAME)
         print(f"  ✓ Registered: {MLFLOW_MODEL_NAME} v{mv.version}")
 
@@ -610,16 +589,10 @@ def main():
             "model_version":   str(mv.version),
         })
 
-        os.unlink(best_local)
-
-        # Lưu history lên S3
-        save_pkl(
-            {"phase1": h1.history, "phase2": h2.history},
-            "preprocessed/training_history.pkl",
-            bucket=S3_OUTPUT_BUCKET,
-        )
-
-    print(f"\n  Model → s3://{S3_OUTPUT_BUCKET}/{KEY_PHASE2}")
+        # Lưu history lên disk
+        with open(os.path.join(DATA_DIR, "final/training_history.pkl"), "wb") as f:
+            pickle.dump({"phase1": h1.history, "phase2": h2.history}, f)
+    print(f"\n  Model → {KEY_PHASE2}")
     print(f"  MLflow Run: {MLFLOW_TRACKING_URI}/#/experiments/{MLFLOW_EXPERIMENT}/runs/{run_id}")
     print(f"  Registry  : {MLFLOW_MODEL_NAME} v{mv.version}")
     print("\nBước 5 hoàn thành!")

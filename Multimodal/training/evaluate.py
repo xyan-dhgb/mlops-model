@@ -30,11 +30,13 @@ from sklearn.metrics import (
     recall_score, precision_score, confusion_matrix,
 )
 
-from s3_utils import (
-    load_npy, load_pkl, load_keras_model,
-    upload_bytes, save_pkl,
-    S3_OUTPUT_BUCKET,
-)
+import pickle
+from tensorflow.keras.models import load_model
+
+DATA_DIR = os.environ.get("DATA_DIR", "/app/data")
+os.makedirs(os.path.join(DATA_DIR, "final"), exist_ok=True)
+os.makedirs(os.path.join(DATA_DIR, "preprocessed"), exist_ok=True)
+
 
 
 def focal_loss(gamma=2.0, alpha=0.25):
@@ -83,27 +85,28 @@ def fig_to_bytes(fig) -> bytes:
 def main():
     print("=" * 60)
     print("BƯỚC 6: Evaluate")
-    print(f"  Bucket: s3://{S3_OUTPUT_BUCKET}/preprocessed/")
+    print(f"  Bucket: {DATA_DIR}/final/")
     print("=" * 60)
 
-    model = load_keras_model(
-        "preprocessed/best_model_isic2024.h5",
-        bucket=S3_OUTPUT_BUCKET,
+    model = load_model(
+        os.path.join(DATA_DIR, "final/best_model_isic2024.h5"),
+        compile=False,
         custom_objects={"focal_loss": focal_loss()},
     )
-    encoders     = load_pkl("preprocessed/encoders.pkl", bucket=S3_OUTPUT_BUCKET)
+    with open(os.path.join(DATA_DIR, "preprocessed/encoders.pkl"), "rb") as f:
+        encoders = pickle.load(f)
     feature_cols = encoders["feature_cols"]
 
     # Load test và val splits
-    print("\nĐọc test split từ S3...")
-    X_tab_test = load_npy("splits/test/X_tab_test.npy", bucket=S3_OUTPUT_BUCKET)
-    X_img_test = load_npy("splits/test/X_img_test.npy", bucket=S3_OUTPUT_BUCKET)
-    y_test     = load_npy("splits/test/y_test.npy",     bucket=S3_OUTPUT_BUCKET)
+    print("\nĐọc test split từ disk...")
+    X_tab_test = np.load(os.path.join(DATA_DIR, "splits/test/X_tab_test.npy"))
+    X_img_test = np.load(os.path.join(DATA_DIR, "splits/test/X_img_test.npy"), mmap_mode="r")
+    y_test     = np.load(os.path.join(DATA_DIR, "splits/test/y_test.npy"))
 
     print("Đọc val split (threshold tuning)...")
-    X_tab_val  = load_npy("splits/val/X_tab_val.npy", bucket=S3_OUTPUT_BUCKET)
-    X_img_val  = load_npy("splits/val/X_img_val.npy", bucket=S3_OUTPUT_BUCKET)
-    y_val      = load_npy("splits/val/y_val.npy",     bucket=S3_OUTPUT_BUCKET)
+    X_tab_val  = np.load(os.path.join(DATA_DIR, "splits/val/X_tab_val.npy"))
+    X_img_val  = np.load(os.path.join(DATA_DIR, "splits/val/X_img_val.npy"), mmap_mode="r")
+    y_val      = np.load(os.path.join(DATA_DIR, "splits/val/y_val.npy"))
 
     # Predict
     prob_val  = model.predict(
@@ -131,10 +134,10 @@ def main():
         print(f"  {k:20s}: {v}")
 
     # Lưu metrics
-    upload_bytes(json.dumps(metrics, indent=2).encode(),
-                 "preprocessed/metrics.json", bucket=S3_OUTPUT_BUCKET)
-    upload_bytes(str(best_thr).encode(),
-                 "preprocessed/best_threshold.txt", bucket=S3_OUTPUT_BUCKET)
+    with open(os.path.join(DATA_DIR, "final/metrics.json"), "w", encoding="utf-8") as f:
+        json.dump(metrics, f, indent=2)
+    with open(os.path.join(DATA_DIR, "final/best_threshold.txt"), "w") as f:
+        f.write(str(best_thr))
 
     # ROC Curve
     fpr, tpr, _ = roc_curve(y_test, prob_test)
@@ -145,8 +148,8 @@ def main():
     ax.set_xlabel("FPR"); ax.set_ylabel("TPR")
     ax.set_title("ROC Curve — ISIC 2024 Test Set")
     ax.legend(); ax.grid(alpha=0.3)
-    upload_bytes(fig_to_bytes(fig), "preprocessed/roc_curve.png",
-                 bucket=S3_OUTPUT_BUCKET)
+    with open(os.path.join(DATA_DIR, "final/roc_curve.png"), "wb") as f:
+        f.write(fig_to_bytes(fig))
     plt.close()
 
     # Confusion Matrix
@@ -164,8 +167,8 @@ def main():
                     fontsize=14, fontweight="bold",
                     color="white" if cm[i,j] > cm.max()/2 else "black")
     plt.tight_layout()
-    upload_bytes(fig_to_bytes(fig), "preprocessed/confusion_matrix.png",
-                 bucket=S3_OUTPUT_BUCKET)
+    with open(os.path.join(DATA_DIR, "final/confusion_matrix.png"), "wb") as f:
+        f.write(fig_to_bytes(fig))
     plt.close()
 
     # Baseline profile cho drift monitor
@@ -180,10 +183,10 @@ def main():
         for i, col in enumerate(feature_cols)
     }
     baseline["_prediction_rate"] = float(prob_val.mean())
-    upload_bytes(json.dumps(baseline, indent=2).encode(),
-                 "preprocessed/baseline_profile.json", bucket=S3_OUTPUT_BUCKET)
+    with open(os.path.join(DATA_DIR, "final/baseline_profile.json"), "w", encoding="utf-8") as f:
+        json.dump(baseline, f, indent=2)
 
-    print(f"\nTất cả kết quả → s3://{S3_OUTPUT_BUCKET}/preprocessed/")
+    print(f"\nTất cả kết quả → {DATA_DIR}/final/")
     print("\nBước 6 hoàn thành!")
 
 

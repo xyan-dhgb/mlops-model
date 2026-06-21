@@ -22,10 +22,16 @@ from tqdm import tqdm
 
 from s3_utils import (
     get_s3_client,
-    download_bytes, upload_bytes, load_csv,
-    s3_key_exists, list_s3_keys,
-    S3_INPUT_BUCKET, S3_INPUT_PREFIX, S3_OUTPUT_BUCKET,
+    S3_INPUT_BUCKET, S3_INPUT_PREFIX
 )
+
+DATA_DIR = os.environ.get("DATA_DIR", "/app/data")
+RAW_IMG_DIR = os.path.join(DATA_DIR, "raw/images")
+PRE_IMG_DIR = os.path.join(DATA_DIR, "preprocessed/images")
+os.makedirs(RAW_IMG_DIR, exist_ok=True)
+os.makedirs(PRE_IMG_DIR, exist_ok=True)
+import pandas as pd
+
 
 IMAGE_SIZE = int(os.environ.get("IMAGE_SIZE", "224"))
 MAX_IMAGES = os.environ.get("MAX_IMAGES", "")    # "" = tất cả
@@ -66,7 +72,7 @@ def main():
     print("=" * 60)
 
     # Đọc metadata để biết danh sách isic_id + nhãn
-    df_meta = load_csv("raw/metadata.csv", bucket=S3_OUTPUT_BUCKET)
+    df_meta = pd.read_csv(os.path.join(DATA_DIR, "raw/metadata.csv"))
     print(f"Metadata: {len(df_meta):,} mẫu")
 
     mal_ids = df_meta[df_meta["target"] == 1]["isic_id"].tolist()
@@ -96,9 +102,9 @@ def main():
     print("Bắt đầu trích xuất + tiền xử lý ảnh...")
     extracted = preprocessed = skipped = errors = 0
 
-    # Bulk check existing files to avoid 20,000+ API calls
-    existing_raw = set(list_s3_keys("raw/images/", bucket=S3_OUTPUT_BUCKET))
-    existing_pre = set(list_s3_keys("preprocessed/images/", bucket=S3_OUTPUT_BUCKET))
+    # Bulk check existing files to avoid recreating
+    existing_raw = set(os.listdir(RAW_IMG_DIR)) if os.path.exists(RAW_IMG_DIR) else set()
+    existing_pre = set(os.listdir(PRE_IMG_DIR)) if os.path.exists(PRE_IMG_DIR) else set()
 
     with h5py.File(hdf5_local, "r") as hf:
         all_keys = list(hf.keys())
@@ -110,21 +116,20 @@ def main():
                 img_bytes = bytes(hf[isic_id][()])
 
                 # ── raw/images/<id>.jpg ← bytes gốc từ HDF5
-                raw_key = f"raw/images/{isic_id}.jpg"
-                if raw_key not in existing_raw:
-                    upload_bytes(img_bytes, raw_key, S3_OUTPUT_BUCKET)
+                raw_filename = f"{isic_id}.jpg"
+                if raw_filename not in existing_raw:
+                    with open(os.path.join(RAW_IMG_DIR, raw_filename), "wb") as f:
+                        f.write(img_bytes)
                     extracted += 1
 
                 # ── preprocessed/images/<id>.png ← sau pipeline
-                pre_key = f"preprocessed/images/{isic_id}.png"
-                if pre_key not in existing_pre:
+                pre_filename = f"{isic_id}.png"
+                if pre_filename not in existing_pre:
                     img_pil = Image.open(io.BytesIO(img_bytes)).convert("RGB")
                     img_arr = np.array(img_pil)
                     img_proc = preprocess_image(img_arr)
 
-                    buf = io.BytesIO()
-                    Image.fromarray(img_proc).save(buf, format="PNG")
-                    upload_bytes(buf.getvalue(), pre_key, S3_OUTPUT_BUCKET)
+                    Image.fromarray(img_proc).save(os.path.join(PRE_IMG_DIR, pre_filename), format="PNG")
                     preprocessed += 1
                 else:
                     skipped += 1
@@ -136,8 +141,8 @@ def main():
 
     os.unlink(hdf5_local)
     print(f"\nKết quả:")
-    print(f"  Đã extract : {extracted:,} ảnh → s3://{S3_OUTPUT_BUCKET}/raw/images/")
-    print(f"  Đã preprocess: {preprocessed:,} → s3://{S3_OUTPUT_BUCKET}/preprocessed/images/")
+    print(f"  Đã extract : {extracted:,} ảnh → {RAW_IMG_DIR}")
+    print(f"  Đã preprocess: {preprocessed:,} → {PRE_IMG_DIR}")
     print(f"  Bỏ qua (đã có): {skipped:,}")
     print(f"  Lỗi: {errors}")
     print("\nBước 2a hoàn thành!")

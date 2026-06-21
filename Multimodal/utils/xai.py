@@ -23,12 +23,12 @@ import matplotlib.pyplot as plt
 import tensorflow as tf
 from PIL import Image
 
-from s3_utils import (
-    load_npy, load_pkl, load_keras_model,
-    download_bytes, upload_bytes, save_npy,
-    list_s3_keys,
-    S3_OUTPUT_BUCKET,
-)
+import pickle
+from tensorflow.keras.models import load_model
+
+DATA_DIR = os.environ.get("DATA_DIR", "/app/data")
+os.makedirs(os.path.join(DATA_DIR, "final/xai/gradcam"), exist_ok=True)
+
 
 NUM_GRADCAM = int(os.environ.get("NUM_GRADCAM_SAMPLES", "20"))
 NUM_SHAP    = int(os.environ.get("NUM_SHAP_SAMPLES", "100"))
@@ -91,8 +91,9 @@ def overlay_and_save(model, isic_id, img_float, tab_arr, label, prob, prefix):
     plt.suptitle(f"ISIC ID: {isic_id}", fontsize=10)
     plt.tight_layout()
 
-    s3_key = f"{prefix}{isic_id}.png"
-    upload_bytes(fig_to_bytes(fig), s3_key, bucket=S3_OUTPUT_BUCKET)
+    s3_key = os.path.join(DATA_DIR, f"{prefix}{isic_id}.png")
+    with open(s3_key, "wb") as f:
+        f.write(fig_to_bytes(fig))
     plt.close()
 
 
@@ -111,7 +112,7 @@ def run_shap(model, X_tab_bg, X_img_bg, X_tab_test, X_img_test, feature_cols, pr
     # index 0 = image shap, index 1 = tabular shap (shape: n × tabular_dim)
     shap_vals = np.array(shap_vals_all[1]).squeeze()
 
-    save_npy(shap_vals, f"{prefix}shap_values.npy", bucket=S3_OUTPUT_BUCKET)
+    np.save(os.path.join(DATA_DIR, f"{prefix}shap_values.npy"), shap_vals)
 
     # Waterfall plots (5 mẫu đầu)
     # GradientExplainer không có .expected_value — tự tính bằng mean prediction
@@ -130,8 +131,9 @@ def run_shap(model, X_tab_bg, X_img_bg, X_tab_test, X_img_test, feature_cols, pr
         plt.figure(figsize=(10, 6))
         shap.plots.waterfall(exp, show=False)
         plt.tight_layout()
-        key = f"{prefix}shap_waterfall_{i}.png"
-        upload_bytes(fig_to_bytes(plt.gcf()), key, bucket=S3_OUTPUT_BUCKET)
+        key = os.path.join(DATA_DIR, f"{prefix}shap_waterfall_{i}.png")
+        with open(key, "wb") as f:
+            f.write(fig_to_bytes(plt.gcf()))
         plt.close()
 
     # Global bar (Top 20)
@@ -144,53 +146,52 @@ def run_shap(model, X_tab_bg, X_img_bg, X_tab_test, X_img_test, feature_cols, pr
     ax.set_xlabel("Mean |SHAP value|")
     ax.set_title("SHAP Global Feature Importance (Top 20 Tabular)")
     plt.tight_layout()
-    upload_bytes(fig_to_bytes(fig), f"{prefix}shap_global_bar.png",
-                 bucket=S3_OUTPUT_BUCKET)
+    with open(os.path.join(DATA_DIR, f"{prefix}shap_global_bar.png"), "wb") as f:
+        f.write(fig_to_bytes(fig))
     plt.close()
-    print(f"SHAP → s3://{S3_OUTPUT_BUCKET}/{prefix}")
+    print(f"SHAP → {DATA_DIR}/{prefix}")
 
 
 def main():
     print("=" * 60)
     print("BƯỚC 7: XAI — Grad-CAM + SHAP")
-    print(f"  Bucket: s3://{S3_OUTPUT_BUCKET}/preprocessed/xai/")
+    print(f"  Bucket: {DATA_DIR}/final/xai/")
     print("=" * 60)
 
-    GRADCAM_PREFIX = "preprocessed/xai/gradcam/"
-    XAI_PREFIX     = "preprocessed/xai/"
+    GRADCAM_PREFIX = "final/xai/gradcam/"
+    XAI_PREFIX     = "final/xai/"
 
-    model = load_keras_model(
-        "preprocessed/best_model_isic2024.h5",
-        bucket=S3_OUTPUT_BUCKET,
+    model = load_model(
+        os.path.join(DATA_DIR, "final/best_model_isic2024.h5"),
+        compile=False,
         custom_objects={"focal_loss": focal_loss()},
     )
-    encoders     = load_pkl("preprocessed/encoders.pkl", bucket=S3_OUTPUT_BUCKET)
+    with open(os.path.join(DATA_DIR, "preprocessed/encoders.pkl"), "rb") as f:
+        encoders = pickle.load(f)
     feature_cols = encoders["feature_cols"]
 
-    best_thr = float(
-        download_bytes("preprocessed/best_threshold.txt",
-                       bucket=S3_OUTPUT_BUCKET).decode().strip()
-    )
+    with open(os.path.join(DATA_DIR, "final/best_threshold.txt"), "r") as f:
+        best_thr = float(f.read().strip())
 
-    X_tab_test = load_npy("splits/test/X_tab_test.npy", bucket=S3_OUTPUT_BUCKET)
-    X_img_test = load_npy("splits/test/X_img_test.npy", bucket=S3_OUTPUT_BUCKET)
-    y_test     = load_npy("splits/test/y_test.npy",     bucket=S3_OUTPUT_BUCKET)
+    X_tab_test = np.load(os.path.join(DATA_DIR, "splits/test/X_tab_test.npy"))
+    X_img_test = np.load(os.path.join(DATA_DIR, "splits/test/X_img_test.npy"), mmap_mode="r")
+    y_test     = np.load(os.path.join(DATA_DIR, "splits/test/y_test.npy"))
 
     # ── Grad-CAM ─────────────────────────────────────────────────────────
     print(f"\nGrad-CAM trên {NUM_GRADCAM} mẫu...")
-    # Lấy isic_id từ preprocessed/images/
-    image_keys = list_s3_keys("preprocessed/images/", bucket=S3_OUTPUT_BUCKET)
-    isic_ids   = [k.split("/")[-1].replace(".png", "") for k in image_keys][:NUM_GRADCAM * 3]
+    # Lấy isic_id từ local preprocessed/images/
+    img_dir = os.path.join(DATA_DIR, "preprocessed/images")
+    image_keys = os.listdir(img_dir) if os.path.exists(img_dir) else []
+    isic_ids   = [k.replace(".png", "") for k in image_keys][:NUM_GRADCAM * 3]
 
     done_gradcam = 0
     for isic_id in isic_ids:
         if done_gradcam >= NUM_GRADCAM:
             break
         try:
-            img_data = download_bytes(f"preprocessed/images/{isic_id}.png",
-                                       bucket=S3_OUTPUT_BUCKET)
+            img_path = os.path.join(DATA_DIR, f"preprocessed/images/{isic_id}.png")
             img_float = np.array(
-                Image.open(io.BytesIO(img_data)).convert("RGB"), dtype=np.float32
+                Image.open(img_path).convert("RGB"), dtype=np.float32
             ) / 255.0
         except Exception:
             continue
@@ -210,7 +211,7 @@ def main():
                          label, prob, GRADCAM_PREFIX)
         done_gradcam += 1
 
-    print(f"Grad-CAM → s3://{S3_OUTPUT_BUCKET}/{GRADCAM_PREFIX}")
+    print(f"Grad-CAM → {DATA_DIR}/{GRADCAM_PREFIX}")
 
     # ── SHAP ─────────────────────────────────────────────────────────────
     print(f"\nSHAP trên {NUM_SHAP} mẫu (background={SHAP_BG})...")
