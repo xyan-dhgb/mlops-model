@@ -363,7 +363,6 @@ def main():
     print(f"  Bucket: s3://{S3_OUTPUT_BUCKET}/preprocessed/")
     print("=" * 60)
 
-
     KEY_PHASE1 = os.path.join(DATA_DIR, "final/best_model_phase1.h5")
     KEY_PHASE2 = os.path.join(DATA_DIR, "final/best_model_isic2024.h5")
 
