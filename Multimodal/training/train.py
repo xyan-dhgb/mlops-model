@@ -363,44 +363,9 @@ def main():
     print(f"  Bucket: s3://{S3_OUTPUT_BUCKET}/preprocessed/")
     print("=" * 60)
 
+
     KEY_PHASE1 = os.path.join(DATA_DIR, "final/best_model_phase1.h5")
     KEY_PHASE2 = os.path.join(DATA_DIR, "final/best_model_isic2024.h5")
-    if os.path.exists(KEY_PHASE1) and os.path.exists(KEY_PHASE2):
-        print(f"\n[SKIP] Cả 2 model đã tồn tại trên disk:")
-        print(f"  ✓ {KEY_PHASE1}")
-        print(f"  ✓ {KEY_PHASE2}")
-        print("  → Tiến hành tải model từ S3 để đăng ký vào MLflow Registry...")
-
-        mlflow.set_tracking_uri(MLFLOW_TRACKING_URI)
-        setup_mlflow_experiment(MLFLOW_EXPERIMENT)
-
-        local_model_path = KEY_PHASE2
-
-        from tensorflow.keras.models import load_model
-        model = load_model(local_model_path, compile=False)
-
-        with mlflow.start_run(run_name="register-existing-model") as run:
-            run_id = run.info.run_id
-            print("\nĐăng ký model vào MLflow Model Registry (bypass create_logged_model)...")
-            artifact_path = "model"
-
-            with tempfile.TemporaryDirectory() as td:
-                local_model_dir = os.path.join(td, "model_dir")
-                mlflow.tensorflow.save_model(model, path=local_model_dir)
-
-                s3_base_key = f"mlflow_artifacts/{run_id}/{artifact_path}"
-                for root, dirs, files in os.walk(local_model_dir):
-                    for file in files:
-                        local_path = os.path.join(root, file)
-                        rel_path = os.path.relpath(local_path, local_model_dir)
-                        s3_key = f"{s3_base_key}/{rel_path}".replace("\\", "/")
-                        upload_file(local_path, s3_key, bucket=S3_OUTPUT_BUCKET)
-
-            model_uri = f"s3://{S3_OUTPUT_BUCKET}/{s3_base_key}"
-            mv = mlflow.register_model(model_uri, MLFLOW_MODEL_NAME)
-            print(f"  ✓ Registered: {MLFLOW_MODEL_NAME} v{mv.version}")
-
-        sys.exit(0)
 
     # ── Khởi tạo MLflow ─────────────────────────────────────────────────
     mlflow.set_tracking_uri(MLFLOW_TRACKING_URI)
@@ -577,7 +542,7 @@ def main():
                     s3_key = f"{s3_base_key}/{rel_path}".replace("\\", "/")
                     upload_file(local_path, s3_key, bucket=S3_OUTPUT_BUCKET)
 
-        model_uri = f"runs:/{run_id}/{artifact_path}"
+        model_uri = f"s3://{S3_OUTPUT_BUCKET}/{s3_base_key}"
         mv = mlflow.register_model(model_uri, MLFLOW_MODEL_NAME)
         print(f"  ✓ Registered: {MLFLOW_MODEL_NAME} v{mv.version}")
 
