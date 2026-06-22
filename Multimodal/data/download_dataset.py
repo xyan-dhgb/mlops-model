@@ -41,7 +41,7 @@ def main():
     for file_name in files_to_download:
         s3_key = f"{S3_INPUT_PREFIX}/{file_name}"
         local_path = os.path.join(DATA_DIR, file_name)
-        
+
         print(f"\n[*] Đang kiểm tra s3://{S3_INPUT_BUCKET}/{s3_key}...")
         if not os.path.exists(local_path):
             try:
@@ -67,7 +67,7 @@ def main():
         df.to_csv(csv_out_path, index=False)
         print(f"  Đã tạo bản sao metadata.csv tại {csv_out_path}")
     else:
-        df = [] # fallback
+        df = []  # fallback
 
     # ── 2. Kiểm tra HDF5 ────────────────────────────────────────────────
     hdf5_path = os.path.join(DATA_DIR, "train-image.hdf5")
