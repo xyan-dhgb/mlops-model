@@ -143,6 +143,7 @@ def main():
     print(f"  Lỗi: {errors}")
 
     print("\nĐồng bộ thư mục lên S3 Output Bucket (thay thế DVC)...")
+
     def upload_worker(filename):
         local_path = os.path.join(PRE_IMG_DIR, filename)
         s3_key = f"preprocessed/images/{filename}"

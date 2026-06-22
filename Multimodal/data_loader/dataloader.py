@@ -32,20 +32,20 @@ Ghi (khớp cấu trúc notebook):
 import io
 import json
 import os
+import sys
+import pickle
+import concurrent.futures
+
 import numpy as np
+import pandas as pd
+import cv2
 from PIL import Image, ImageEnhance
 from tqdm import tqdm
 from sklearn.model_selection import train_test_split
-import cv2
-
-import pickle
 import albumentations as A
-import concurrent.futures
-import sys
+
 sys.path.append(os.path.join(os.path.dirname(__file__), '..', 'utils'))
 import s3_utils
-import pandas as pd
-
 DATA_DIR = os.environ.get("DATA_DIR", "/app/data")
 os.makedirs(os.path.join(DATA_DIR, "features"), exist_ok=True)
 os.makedirs(os.path.join(DATA_DIR, "splits/train"), exist_ok=True)
@@ -391,6 +391,7 @@ def main():
     print("\n  Split info → {split_info_path}")
 
     print("\nĐồng bộ thư mục lên S3 Output Bucket (thay thế DVC)...")
+
     def upload_worker(local_path):
         rel_path = os.path.relpath(local_path, DATA_DIR)
         # convert backslashes to forward slashes for S3

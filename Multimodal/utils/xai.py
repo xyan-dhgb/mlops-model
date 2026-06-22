@@ -28,6 +28,7 @@ sys.path.append(os.path.join(os.path.dirname(__file__), '..', 'utils'))
 import s3_utils
 import tensorflow as tf
 from PIL import Image
+from tqdm import tqdm
 
 import pickle
 from tensorflow.keras.models import load_model
@@ -232,6 +233,7 @@ def main():
         prefix       = XAI_PREFIX,
     )
     print("\nĐồng bộ thư mục lên S3 Output Bucket (thay thế DVC)...")
+
     def upload_worker(local_path):
         rel_path = os.path.relpath(local_path, DATA_DIR)
         s3_key = rel_path.replace("\\", "/")
