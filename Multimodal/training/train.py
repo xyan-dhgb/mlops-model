@@ -546,6 +546,7 @@ def main():
         print("\n[5/5] Đăng ký model vào MLflow Model Registry (bypass create_logged_model)...")
         artifact_path = "model"
 
+        os.makedirs(TMP_DIR, exist_ok=True)
         with tempfile.TemporaryDirectory(dir=TMP_DIR) as td:
             local_model_dir = os.path.join(td, "model_dir")
             mlflow.tensorflow.save_model(model, path=local_model_dir)
