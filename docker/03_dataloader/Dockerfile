@@ -14,7 +14,6 @@ RUN pip install --no-cache-dir --retries 5 --timeout 60 \
     opencv-python-headless>=4.8
 
 COPY Multimodal/data_loader/dataloader.py .
-COPY Multimodal/s3_utils.py .
 
 ENV PROCESSED_DIR=/data/processed
 ENV SPLITS_DIR=/data/splits

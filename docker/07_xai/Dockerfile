@@ -22,7 +22,6 @@ RUN pip install --no-cache-dir \
     tf_keras==2.16.0
 
 COPY Multimodal/utils/xai.py .
-COPY Multimodal/s3_utils.py .
 
 # Buộc TF 2.16 dùng Keras 2 (tf_keras) thay vì Keras 3
 ENV TF_USE_LEGACY_KERAS=1

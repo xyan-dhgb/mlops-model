@@ -26,7 +26,7 @@ RUN pip install --no-cache-dir \
     tf_keras==2.16.0
 
 COPY Multimodal/training/evaluate.py .
-COPY Multimodal/s3_utils.py .
+COPY Multimodal/ml_metrics.py .
 
 # Buộc TF 2.16 dùng Keras 2 (tf_keras) thay vì Keras 3 — tránh mọi lỗi
 # serialization khi load .h5 (quantization_config, renorm, get_tensor args, ...)

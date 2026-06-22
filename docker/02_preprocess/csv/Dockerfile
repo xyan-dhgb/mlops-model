@@ -11,7 +11,6 @@ RUN pip install --no-cache-dir \
     scikit-learn==1.5.0
 
 COPY Multimodal/preprocessing/preprocess_csv.py .
-COPY Multimodal/s3_utils.py .
 
 ENV RAW_DIR=/data/raw
 ENV PROCESSED_DIR=/data/processed

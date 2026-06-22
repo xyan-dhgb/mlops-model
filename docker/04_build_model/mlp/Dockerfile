@@ -13,7 +13,6 @@ RUN pip install --no-cache-dir --retries 5 --timeout 60 \
     tf_keras==2.16.0
 
 COPY Multimodal/models/build_mlp.py .
-COPY Multimodal/s3_utils.py .
 
 ENV TF_USE_LEGACY_KERAS=1
 ENV PROCESSED_DIR=/data/processed

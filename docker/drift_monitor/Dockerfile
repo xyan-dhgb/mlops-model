@@ -12,7 +12,7 @@ RUN pip install --no-cache-dir \
     s3fs>=2024.2.0
 
 COPY Multimodal/drift_monitor/drift_monitor.py .
-COPY Multimodal/s3_utils.py .
+# No s3_utils
 
 ENV EVAL_DIR=/data/eval
 ENV PRODUCTION_LOG_DIR=/data/production_logs

@@ -28,7 +28,6 @@ RUN pip install --no-cache-dir \
 
 COPY Multimodal/training/train.py .
 COPY Multimodal/training/augment.py .
-COPY Multimodal/s3_utils.py .
 COPY Multimodal/ml_metrics.py .
 
 # Buộc TF 2.16 dùng Keras 2 (tf_keras) — đảm bảo model .h5 được save

@@ -22,7 +22,6 @@ RUN pip install --no-cache-dir --retries 5 --timeout 60 \
     tqdm==4.66.4
 
 COPY Multimodal/preprocessing/preprocess_image.py .
-COPY Multimodal/s3_utils.py .
 
 ENV RAW_DIR=/data/raw
 ENV PROCESSED_DIR=/data/processed
