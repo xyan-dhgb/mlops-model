@@ -29,46 +29,60 @@ def main():
 
     s3 = get_s3_client()
 
-    # ── 1. Tải & copy metadata CSV ─────────────────────────────────
-    csv_key = f"{S3_INPUT_PREFIX}/train-metadata.csv"
+    # Danh sách các file cần tải từ S3
+    files_to_download = [
+        "train-metadata.csv",
+        "train-image.hdf5",
+        "test-metadata.csv",
+        "test-image.hdf5",
+        "sample_submission.csv"
+    ]
+
+    for file_name in files_to_download:
+        s3_key = f"{S3_INPUT_PREFIX}/{file_name}"
+        local_path = os.path.join(DATA_DIR, file_name)
+        
+        print(f"\n[*] Đang kiểm tra s3://{S3_INPUT_BUCKET}/{s3_key}...")
+        if not os.path.exists(local_path):
+            try:
+                print(f"    -> Đang tải về {local_path}...")
+                s3.download_file(S3_INPUT_BUCKET, s3_key, local_path)
+                print("    -> Tải thành công!")
+            except Exception as e:
+                print(f"    -> Bỏ qua (không tìm thấy trên S3 hoặc lỗi): {e}")
+        else:
+            print(f"    -> File đã tồn tại ở PVC, bỏ qua tải: {local_path}")
+
+    # ── 1. Đọc và phân tích metadata CSV ─────────────────────────────────
     csv_in_path = os.path.join(DATA_DIR, "train-metadata.csv")
-    
-    print(f"\n[1/3] Tải metadata CSV từ s3://{S3_INPUT_BUCKET}/{csv_key}...")
-    if not os.path.exists(csv_in_path):
-        s3.download_file(S3_INPUT_BUCKET, csv_key, csv_in_path)
-        print(f"  Đã tải xong: {csv_in_path}")
+    if os.path.exists(csv_in_path):
+        df = pd.read_csv(csv_in_path)
+        print(f"\nThống kê train-metadata:")
+        print(f"  Tổng mẫu  : {len(df):,}")
+        print(f"  Malignant : {(df['target']==1).sum():,}")
+        print(f"  Benign    : {(df['target']==0).sum():,}")
+
+        # Lưu thêm 1 bản metadata.csv theo format chuẩn của pipeline
+        csv_out_path = os.path.join(DATA_DIR, "metadata.csv")
+        df.to_csv(csv_out_path, index=False)
+        print(f"  Đã tạo bản sao metadata.csv tại {csv_out_path}")
     else:
-        print(f"  File đã tồn tại, bỏ qua tải: {csv_in_path}")
+        df = [] # fallback
 
-    df = pd.read_csv(csv_in_path)
-    print(f"  Tổng mẫu  : {len(df):,}")
-    print(f"  Malignant : {(df['target']==1).sum():,}")
-    print(f"  Benign    : {(df['target']==0).sum():,}")
-
-    # Lưu thêm 1 bản metadata.csv theo format chuẩn của pipeline
-    csv_out_path = os.path.join(DATA_DIR, "metadata.csv")
-    df.to_csv(csv_out_path, index=False)
-    print(f"  Đã tạo bản sao metadata.csv tại {csv_out_path}")
-
-    # ── 2. Tải HDF5 ────────────────────────────────────────────────
-    hdf5_key = f"{S3_INPUT_PREFIX}/train-image.hdf5"
+    # ── 2. Kiểm tra HDF5 ────────────────────────────────────────────────
     hdf5_path = os.path.join(DATA_DIR, "train-image.hdf5")
-    
-    print(f"\n[2/3] Tải HDF5 image file từ s3://{S3_INPUT_BUCKET}/{hdf5_key}...")
-    if not os.path.exists(hdf5_path):
-        s3.download_file(S3_INPUT_BUCKET, hdf5_key, hdf5_path)
-        print(f"  Đã tải xong HDF5: {hdf5_path}")
+    if os.path.exists(hdf5_path):
+        hdf5_size_gb = os.path.getsize(hdf5_path) / 1e9
+        print(f"\nThống kê train-image.hdf5:")
+        print(f"  Kích thước thực tế: {hdf5_size_gb:.2f} GB")
     else:
-        print(f"  File HDF5 đã tồn tại, bỏ qua tải: {hdf5_path}")
-
-    hdf5_size_gb = os.path.getsize(hdf5_path) / 1e9
-    print(f"  Kích thước thực tế: {hdf5_size_gb:.2f} GB")
+        hdf5_size_gb = 0
 
     # ── 3. Ghi manifest ─────────────────────────────────────────────────
     manifest = {
-        "csv_rows": len(df),
-        "malignant": int((df["target"] == 1).sum()),
-        "benign": int((df["target"] == 0).sum()),
+        "csv_rows": len(df) if isinstance(df, pd.DataFrame) else 0,
+        "malignant": int((df["target"] == 1).sum()) if isinstance(df, pd.DataFrame) else 0,
+        "benign": int((df["target"] == 0).sum()) if isinstance(df, pd.DataFrame) else 0,
         "hdf5_size_gb": round(hdf5_size_gb, 3),
         "status": "ready",
     }
