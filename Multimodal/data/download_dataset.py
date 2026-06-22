@@ -1,57 +1,74 @@
 """
-prepare_data.py — Bước 1: Kiểm tra dữ liệu thô trên S3 input bucket
+prepare_data.py — Bước 1: Fetch dữ liệu thô từ S3 (ISIC Challenge) xuống PVC cục bộ.
 
-Input  : s3://kltn-isic-2024-challenge/isic-2024-challenge/train-metadata.csv
-         s3://kltn-isic-2024-challenge/isic-2024-challenge/train-image.hdf5
-Output : s3://kltn-isic-2024-colab/raw/metadata.csv   (copy metadata gốc)
-         In ra manifest JSON xác nhận dataset sẵn sàng
+Kịch bản này dùng boto3 tải trực tiếp file từ bucket ngoài (kltn-isic-2024-challenge)
+vào thư mục DATA_DIR (/data/raw trên PVC) để mồi dữ liệu cho các bước sau.
 """
 import os
 import json
+import boto3
 import pandas as pd
 
 DATA_DIR = os.environ.get("DATA_DIR", "/app/data/raw")
+S3_INPUT_BUCKET = os.environ.get("S3_INPUT_BUCKET", "kltn-isic-2024-challenge")
+S3_INPUT_PREFIX = os.environ.get("S3_INPUT_PREFIX", "isic-2024-challenge")
+
 os.makedirs(DATA_DIR, exist_ok=True)
+
+def get_s3_client():
+    # Sử dụng credentials từ môi trường K8s/Argo
+    return boto3.client('s3')
 
 def main():
     print("=" * 60)
-    print("BƯỚC 1: Kiểm tra dataset ISIC 2024 (Local via DVC)")
-    print(f"  Thư mục: {DATA_DIR}")
+    print("BƯỚC 1: Fetch dataset ISIC 2024 từ S3 -> PVC")
+    print(f"  Bucket: {S3_INPUT_BUCKET}")
+    print(f"  Prefix: {S3_INPUT_PREFIX}")
+    print(f"  Lưu tại: {DATA_DIR}")
     print("=" * 60)
 
-    # ── 1. Kiểm tra & copy metadata CSV ─────────────────────────────────
-    csv_in_path = os.path.join(DATA_DIR, "train-metadata.csv")
-    print(f"\n[1/3] Đọc metadata CSV từ {csv_in_path}...")
+    s3 = get_s3_client()
 
+    # ── 1. Tải & copy metadata CSV ─────────────────────────────────
+    csv_key = f"{S3_INPUT_PREFIX}/train-metadata.csv"
+    csv_in_path = os.path.join(DATA_DIR, "train-metadata.csv")
+    
+    print(f"\n[1/3] Tải metadata CSV từ s3://{S3_INPUT_BUCKET}/{csv_key}...")
     if not os.path.exists(csv_in_path):
-        raise FileNotFoundError(f"Không tìm thấy {csv_in_path}. Hãy đảm bảo DVC đã pull dữ liệu.")
+        s3.download_file(S3_INPUT_BUCKET, csv_key, csv_in_path)
+        print(f"  Đã tải xong: {csv_in_path}")
+    else:
+        print(f"  File đã tồn tại, bỏ qua tải: {csv_in_path}")
 
     df = pd.read_csv(csv_in_path)
     print(f"  Tổng mẫu  : {len(df):,}")
     print(f"  Malignant : {(df['target']==1).sum():,}")
     print(f"  Benign    : {(df['target']==0).sum():,}")
-    print(f"  Cột       : {list(df.columns)[:8]}...")
 
-    # Copy sang output để các bước sau đọc từ một nơi thống nhất
+    # Lưu thêm 1 bản metadata.csv theo format chuẩn của pipeline
     csv_out_path = os.path.join(DATA_DIR, "metadata.csv")
     df.to_csv(csv_out_path, index=False)
-    print(f"  Đã lưu metadata.csv tại {csv_out_path}")
+    print(f"  Đã tạo bản sao metadata.csv tại {csv_out_path}")
 
-    # ── 2. Kiểm tra HDF5 ────────────────────────────────────────────────
+    # ── 2. Tải HDF5 ────────────────────────────────────────────────
+    hdf5_key = f"{S3_INPUT_PREFIX}/train-image.hdf5"
     hdf5_path = os.path.join(DATA_DIR, "train-image.hdf5")
-    print(f"\n[2/3] Kiểm tra HDF5 image file tại {hdf5_path}...")
-
+    
+    print(f"\n[2/3] Tải HDF5 image file từ s3://{S3_INPUT_BUCKET}/{hdf5_key}...")
     if not os.path.exists(hdf5_path):
-        raise FileNotFoundError(f"Không tìm thấy {hdf5_path}. Hãy đảm bảo DVC đã pull dữ liệu.")
+        s3.download_file(S3_INPUT_BUCKET, hdf5_key, hdf5_path)
+        print(f"  Đã tải xong HDF5: {hdf5_path}")
+    else:
+        print(f"  File HDF5 đã tồn tại, bỏ qua tải: {hdf5_path}")
 
     hdf5_size_gb = os.path.getsize(hdf5_path) / 1e9
-    print(f"  Kích thước: {hdf5_size_gb:.2f} GB")
+    print(f"  Kích thước thực tế: {hdf5_size_gb:.2f} GB")
 
     # ── 3. Ghi manifest ─────────────────────────────────────────────────
     manifest = {
-        "csv_rows":    len(df),
-        "malignant":   int((df["target"] == 1).sum()),
-        "benign":      int((df["target"] == 0).sum()),
+        "csv_rows": len(df),
+        "malignant": int((df["target"] == 1).sum()),
+        "benign": int((df["target"] == 0).sum()),
         "hdf5_size_gb": round(hdf5_size_gb, 3),
         "status": "ready",
     }
