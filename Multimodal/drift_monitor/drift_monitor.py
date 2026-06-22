@@ -264,7 +264,7 @@ def load_production_logs() -> pd.DataFrame | None:
     if not os.path.exists(PRODUCTION_LOG_DIR):
         log.warning(f"Thư mục {PRODUCTION_LOG_DIR} không tồn tại.")
         return None
-        
+
     dfs = []
     for filename in os.listdir(PRODUCTION_LOG_DIR):
         path = os.path.join(PRODUCTION_LOG_DIR, filename)
@@ -432,7 +432,7 @@ def check_drift():
     report_path = os.path.join(REPORT_DIR, f"drift_report_{date_str}.json")
     with open(report_path, "w", encoding="utf-8") as f:
         json.dump(report, f, indent=2)
-        
+
     log.info(f"\n{'='*65}")
     log.info(f"  TỔNG KẾT: {status}")
     log.info(f"  Alerts  : {len(alerts)}")

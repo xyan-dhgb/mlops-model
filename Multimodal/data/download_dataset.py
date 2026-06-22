@@ -22,7 +22,7 @@ def main():
     # ── 1. Kiểm tra & copy metadata CSV ─────────────────────────────────
     csv_in_path = os.path.join(DATA_DIR, "train-metadata.csv")
     print(f"\n[1/3] Đọc metadata CSV từ {csv_in_path}...")
-    
+
     if not os.path.exists(csv_in_path):
         raise FileNotFoundError(f"Không tìm thấy {csv_in_path}. Hãy đảm bảo DVC đã pull dữ liệu.")
 
@@ -40,10 +40,10 @@ def main():
     # ── 2. Kiểm tra HDF5 ────────────────────────────────────────────────
     hdf5_path = os.path.join(DATA_DIR, "train-image.hdf5")
     print(f"\n[2/3] Kiểm tra HDF5 image file tại {hdf5_path}...")
-    
+
     if not os.path.exists(hdf5_path):
         raise FileNotFoundError(f"Không tìm thấy {hdf5_path}. Hãy đảm bảo DVC đã pull dữ liệu.")
-        
+
     hdf5_size_gb = os.path.getsize(hdf5_path) / 1e9
     print(f"  Kích thước: {hdf5_size_gb:.2f} GB")
 

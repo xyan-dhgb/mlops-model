@@ -21,7 +21,6 @@ from PIL import Image, ImageEnhance
 from tqdm import tqdm
 
 
-
 DATA_DIR = os.environ.get("DATA_DIR", "/app/data")
 RAW_IMG_DIR = os.path.join(DATA_DIR, "raw/images")
 PRE_IMG_DIR = os.path.join(DATA_DIR, "preprocessed/images")
