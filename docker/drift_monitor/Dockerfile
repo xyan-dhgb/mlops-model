@@ -2,6 +2,9 @@ FROM python:3.10-slim
 
 WORKDIR /app
 
+RUN apt-get update && apt-get install -y git && rm -rf /var/lib/apt/lists/* \
+    && git init
+
 RUN pip install --no-cache-dir \
     dvc[s3]==3.40.0 \
     pathspec==0.11.2 \

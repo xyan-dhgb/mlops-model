@@ -2,6 +2,9 @@ FROM tensorflow/tensorflow:2.16.1-gpu
 
 WORKDIR /app
 
+RUN apt-get update && apt-get install -y git && rm -rf /var/lib/apt/lists/* \
+    && git init
+
 RUN apt-get update && apt-get install -y --no-install-recommends \
     libgl1-mesa-glx \
     libglib2.0-0 \

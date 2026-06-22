@@ -10,6 +10,9 @@ RUN for i in 1 2 3; do \
 
 WORKDIR /app
 
+RUN apt-get update && apt-get install -y git && rm -rf /var/lib/apt/lists/* \
+    && git init
+
 RUN pip install --no-cache-dir --retries 5 --timeout 60 \
     dvc[s3]==3.40.0 \
     pathspec==0.11.2 \

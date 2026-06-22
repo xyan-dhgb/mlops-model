@@ -3,6 +3,9 @@ FROM tensorflow/tensorflow:2.16.1-gpu
 
 WORKDIR /app
 
+RUN apt-get update && apt-get install -y git && rm -rf /var/lib/apt/lists/* \
+    && git init
+
 # Cài các thư viện còn lại
 # blinker 1.4 được cài bằng distutils trong base image TF — pip không thể uninstall.
 # Cài đè thủ công trước để mlflow cài blinker mới không bị xung đột.
