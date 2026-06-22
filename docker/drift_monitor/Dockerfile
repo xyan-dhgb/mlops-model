@@ -7,9 +7,9 @@ RUN pip install --no-cache-dir \
     pandas==2.2.2 \
     scipy==1.13.0 \
     evidently==0.4.30 \
-    dvc[s3]>=3.0.0 \
-    boto3>=1.34.0 \
-    s3fs>=2024.2.0
+    dvc[s3] \
+    boto3 \
+    s3fs
 
 COPY Multimodal/drift_monitor/drift_monitor.py .
 # No s3_utils

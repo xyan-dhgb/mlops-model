@@ -11,9 +11,9 @@ RUN for i in 1 2 3; do \
 WORKDIR /app
 
 RUN pip install --no-cache-dir --retries 5 --timeout 60 \
-    dvc[s3]>=3.0.0 \
-    boto3>=1.34.0 \
-    s3fs>=2024.2.0 \
+    dvc[s3] \
+    boto3 \
+    s3fs \
     numpy==1.26.4 \
     pandas==2.2.2 \
     opencv-python-headless==4.10.0.84 \

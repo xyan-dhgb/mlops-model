@@ -3,9 +3,9 @@ FROM python:3.10-slim
 WORKDIR /app
 
 RUN pip install --no-cache-dir \
-    dvc[s3]>=3.0.0 \
-    boto3>=1.34.0 \
-    s3fs>=2024.2.0 \
+    dvc[s3] \
+    boto3 \
+    s3fs \
     numpy==1.26.4 \
     pandas==2.2.2 \
     scikit-learn==1.5.0
