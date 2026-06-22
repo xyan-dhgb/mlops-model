@@ -311,11 +311,18 @@ def main():
               f"Mal={int(ys.sum())} ({100*ys.mean():.1f}%)")
 
         if name == "train":
-            X_tab_train, X_img_train, y_train = xs, xi, ys
+            X_tab_train, y_train = xs, ys
         elif name == "val":
-            X_tab_val, X_img_val, y_val = xs, xi, ys
+            X_tab_val, y_val = xs, ys
         elif name == "test":
-            X_tab_test, X_img_test, y_test = xs, xi, ys
+            X_tab_test, y_test = xs, ys
+            
+        # Dọn dẹp RAM ngay sau khi lưu
+        del xi
+        
+    import gc
+    del X_images
+    gc.collect()
 
     # ── Oversampling trên tập TRAIN ───────────────────────────────────────────
     # Chỉ oversample train — val và test giữ nguyên phân phối thật
@@ -326,6 +333,9 @@ def main():
     print(f"  target_ratio = {OVERSAMPLE_RATIO} (giảm từ 0.35 → 0.25 so với bản cũ, tránh overfit)")
     print(f"  strong augmentation = True")
     print(f"  Lý do: augmentation đa dạng hơn SMOTE, phù hợp hơn với dữ liệu ảnh")
+
+    # Load lại X_img_train dưới dạng memmap để tiết kiệm RAM
+    X_img_train = np.load(os.path.join(DATA_DIR, "splits/train/X_img_train.npy"), mmap_mode="r")
 
     X_img_train_os, X_tab_train_os, y_train_os = oversample_malignant(
         X_img_train, X_tab_train, y_train,
