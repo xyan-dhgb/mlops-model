@@ -42,7 +42,6 @@ import cv2
 from PIL import Image, ImageEnhance
 from tqdm import tqdm
 from sklearn.model_selection import train_test_split
-import albumentations as A
 
 sys.path.append(os.path.join(os.path.dirname(__file__), '..', 'utils'))
 import s3_utils

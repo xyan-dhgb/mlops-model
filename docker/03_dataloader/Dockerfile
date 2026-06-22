@@ -6,8 +6,7 @@ RUN apt-get update && apt-get install -y git && rm -rf /var/lib/apt/lists/* \
     && git init
 
 RUN pip install --no-cache-dir --retries 5 --timeout 60 \
-    
-    
+
     boto3==1.34.40 \
     numpy==1.26.4 \
     pandas==2.2.2 \
