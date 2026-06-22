@@ -2,8 +2,10 @@
 build_efficientnetB3.py — Bước 4a: Định nghĩa Image Branch
 
 Ghi:
-  s3://kltn-isic-2024-colab/preprocessed/efficientnetB3_architecture.json
-  s3://kltn-isic-2024-colab/preprocessed/efficientnetB3_meta.json
+  DVC/Local (preprocessed/efficientnetB3_architecture.json)
+  DVC/Local (preprocessed/efficientnetB3_meta.json)
+# Cũ: s3://kltn-isic-2024-colab/preprocessed/efficientnetB3_architecture.json
+# Cũ: s3://kltn-isic-2024-colab/preprocessed/efficientnetB3_meta.json
   (weights không lưu — model được build lại khi train)
 """
 import json

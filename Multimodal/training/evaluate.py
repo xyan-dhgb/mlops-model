@@ -1,17 +1,20 @@
 """
 evaluate.py — Bước 6: Đánh giá + Grid-search Threshold
 
-Đọc từ S3:
+Đọc từ Local/DVC:
   preprocessed/best_model_isic2024.h5
   splits/test/X_tab_test.npy, X_img_test.npy, y_test.npy
   splits/val/  (cho threshold tuning)
+# Cũ: s3://kltn-isic-2024-colab/preprocessed/best_model_isic2024.h5
+# Cũ: s3://kltn-isic-2024-colab/splits/...
 
-Ghi lên S3:
+Ghi lên Local/DVC:
   preprocessed/metrics.json
   preprocessed/best_threshold.txt
   preprocessed/roc_curve.png
   preprocessed/confusion_matrix.png
   preprocessed/baseline_profile.json    ← dùng cho drift monitor
+# Cũ: s3://kltn-isic-2024-colab/preprocessed/...
 
 Khớp notebook cell 38 (compute_pauc, find_optimal_threshold):
   pAUC: TPR ≥ 0.80, chuẩn hóa về [0,1] / (1 - min_tpr)

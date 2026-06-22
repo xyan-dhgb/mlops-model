@@ -1,18 +1,20 @@
 """
 xai.py — Bước 7: Grad-CAM + SHAP DeepExplainer
 
-Đọc từ S3:
-  preprocessed/best_model_isic2024.h5
-  preprocessed/encoders.pkl
-  preprocessed/best_threshold.txt
-  preprocessed/images/<isic_id>.png   ← ảnh đã preprocessed
-  splits/test/X_tab_test.npy, X_img_test.npy, y_test.npy
+Đọc từ Local/DVC:
+  Local/DVC (final/best_model_isic2024.h5)
+  Local/DVC (preprocessed/encoders.pkl)
+  Local/DVC (final/best_threshold.txt)
+  Local/DVC (preprocessed/images/<isic_id>.png)
+  Local/DVC (splits/test/X_tab_test.npy, X_img_test.npy, y_test.npy)
+# Cũ: s3://kltn-isic-2024-colab/preprocessed/best_model_isic2024.h5 ...
 
-Ghi lên S3:
-  preprocessed/xai/gradcam/<isic_id>.png
-  preprocessed/xai/shap_values.npy
-  preprocessed/xai/shap_waterfall_<i>.png
-  preprocessed/xai/shap_global_bar.png
+Ghi lên Local/DVC:
+  Local/DVC (final/xai/gradcam/<isic_id>.png)
+  Local/DVC (final/xai/shap_values.npy)
+  Local/DVC (final/xai/shap_waterfall_<i>.png)
+  Local/DVC (final/xai/shap_global_bar.png)
+# Cũ: s3://kltn-isic-2024-colab/preprocessed/xai/...
 """
 import io
 import os
@@ -91,8 +93,8 @@ def overlay_and_save(model, isic_id, img_float, tab_arr, label, prob, prefix):
     plt.suptitle(f"ISIC ID: {isic_id}", fontsize=10)
     plt.tight_layout()
 
-    s3_key = os.path.join(DATA_DIR, f"{prefix}{isic_id}.png")
-    with open(s3_key, "wb") as f:
+    out_path = os.path.join(DATA_DIR, f"{prefix}{isic_id}.png")
+    with open(out_path, "wb") as f:
         f.write(fig_to_bytes(fig))
     plt.close()
 

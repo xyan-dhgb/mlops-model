@@ -1,29 +1,33 @@
 """
-dataloader.py — Bước 3: Tạo features array + stratified splits + xử lý mất cân bằng → S3
+dataloader.py — Bước 3: Tạo features array + stratified splits + xử lý mất cân bằng → Local/DVC
 
 Đọc :
-  s3://kltn-isic-2024-colab/preprocessed/metadata_clean.csv
-  s3://kltn-isic-2024-colab/preprocessed/encoders.pkl
-  s3://kltn-isic-2024-colab/preprocessed/images/<isic_id>.png  (streaming)
+  Local/DVC (preprocessed/metadata_clean.csv)
+  Local/DVC (preprocessed/encoders.pkl)
+  Local/DVC (preprocessed/images/<isic_id>.png)
+# Cũ: s3://kltn-isic-2024-colab/preprocessed/metadata_clean.csv
+# Cũ: s3://kltn-isic-2024-colab/preprocessed/encoders.pkl
+# Cũ: s3://kltn-isic-2024-colab/preprocessed/images/<isic_id>.png  (streaming)
 
 Ghi (khớp cấu trúc notebook):
-  s3://kltn-isic-2024-colab/features/X_tabular.npy
-  s3://kltn-isic-2024-colab/features/X_images.npy
-  s3://kltn-isic-2024-colab/features/y_labels.npy
+  Local/DVC (features/X_tabular.npy)
+  Local/DVC (features/X_images.npy)
+  Local/DVC (features/y_labels.npy)
 
-  s3://kltn-isic-2024-colab/splits/train/X_tab_train.npy
-  s3://kltn-isic-2024-colab/splits/train/X_img_train.npy
-  s3://kltn-isic-2024-colab/splits/train/y_train.npy
-  s3://kltn-isic-2024-colab/splits/train/X_tab_train_os.npy   ← sau oversampling
-  s3://kltn-isic-2024-colab/splits/train/X_img_train_os.npy   ← sau oversampling
-  s3://kltn-isic-2024-colab/splits/train/y_train_os.npy       ← sau oversampling
-  s3://kltn-isic-2024-colab/splits/val/X_tab_val.npy
-  s3://kltn-isic-2024-colab/splits/val/X_img_val.npy
-  s3://kltn-isic-2024-colab/splits/val/y_val.npy
-  s3://kltn-isic-2024-colab/splits/test/X_tab_test.npy
-  s3://kltn-isic-2024-colab/splits/test/X_img_test.npy
-  s3://kltn-isic-2024-colab/splits/test/y_test.npy
-  s3://kltn-isic-2024-colab/splits/split_info.json
+  Local/DVC (splits/train/X_tab_train.npy)
+  Local/DVC (splits/train/X_img_train.npy)
+  Local/DVC (splits/train/y_train.npy)
+  Local/DVC (splits/train/X_tab_train_os.npy)   ← sau oversampling
+  Local/DVC (splits/train/X_img_train_os.npy)   ← sau oversampling
+  Local/DVC (splits/train/y_train_os.npy)       ← sau oversampling
+  Local/DVC (splits/val/X_tab_val.npy)
+  Local/DVC (splits/val/X_img_val.npy)
+  Local/DVC (splits/val/y_val.npy)
+  Local/DVC (splits/test/X_tab_test.npy)
+  Local/DVC (splits/test/X_img_test.npy)
+  Local/DVC (splits/test/y_test.npy)
+  Local/DVC (splits/split_info.json)
+# Cũ: s3://kltn-isic-2024-colab/features/... và splits/...
 """
 import io
 import json
@@ -51,7 +55,7 @@ OVERSAMPLE_RATIO = float(os.environ.get("OVERSAMPLE_RATIO", "0.25"))   # target 
 
 # ── Image loading ─────────────────────────────────────────────────────────────
 
-def load_image_from_s3(isic_id: str) -> np.ndarray | None:
+def load_image(isic_id: str) -> np.ndarray | None:
     """Tải ảnh đã preprocessed từ local, trả về float32 [H,W,3] / None nếu lỗi."""
     path = os.path.join(DATA_DIR, f"preprocessed/images/{isic_id}.png")
     try:
@@ -198,7 +202,7 @@ def oversample_malignant(X_img: np.ndarray,
 
 def main():
     print("=" * 60)
-    print("BƯỚC 3: Tạo features array + splits + oversampling → S3")
+    print("BƯỚC 3: Tạo features array + splits + oversampling → Local/DVC")
     print(f"  Bucket          : {DATA_DIR}")
     print(f"  Oversample ratio: {OVERSAMPLE_RATIO}")
     print("=" * 60)
@@ -214,7 +218,7 @@ def main():
         encoders = pickle.load(f)
     feature_cols = encoders["feature_cols"]
 
-    # ── Kiểm tra ảnh có trên S3 ───────────────────────────────────────────────
+    # ── Kiểm tra ảnh có trên Local/DVC ───────────────────────────────────────────────
     print("\nKiểm tra ảnh đã preprocessed trên local...")
     img_dir = os.path.join(DATA_DIR, "preprocessed/images")
     existing_keys = os.listdir(img_dir) if os.path.exists(img_dir) else []
@@ -233,7 +237,7 @@ def main():
 
     valid_count = 0
     for _, row in tqdm(df_available.iterrows(), total=n_samples, desc="Loading images"):
-        img = load_image_from_s3(row["isic_id"])
+        img = load_image(row["isic_id"])
         if img is None:
             continue
         X_tabular[valid_count] = row[feature_cols].values.astype(np.float32)

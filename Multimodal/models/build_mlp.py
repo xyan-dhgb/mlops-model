@@ -1,10 +1,13 @@
 """
 build_mlp.py — Bước 4b: Định nghĩa Tabular Branch (MLP)
 
-Đọc : s3://kltn-isic-2024-colab/preprocessed/encoders.pkl  (lấy tabular_dim)
+Đọc : DVC/Local (preprocessed/encoders.pkl)  (lấy tabular_dim)
+# Cũ: s3://kltn-isic-2024-colab/preprocessed/encoders.pkl
 Ghi :
-  s3://kltn-isic-2024-colab/preprocessed/mlp_architecture.json
-  s3://kltn-isic-2024-colab/preprocessed/mlp_meta.json
+  DVC/Local (preprocessed/mlp_architecture.json)
+  DVC/Local (preprocessed/mlp_meta.json)
+# Cũ: s3://kltn-isic-2024-colab/preprocessed/mlp_architecture.json
+# Cũ: s3://kltn-isic-2024-colab/preprocessed/mlp_meta.json
 """
 import json
 import tensorflow as tf

@@ -43,7 +43,21 @@ import mlflow.tensorflow
 from mlflow.models.signature import infer_signature
 
 from augment import augment_image
-from s3_utils import upload_file, S3_OUTPUT_BUCKET
+import boto3
+
+S3_OUTPUT_BUCKET = os.environ.get("S3_OUTPUT_BUCKET", "kltn-isic-2024-colab")
+
+def s3_upload_file(local_path, s3_key, bucket):
+    s3 = boto3.client(
+        "s3",
+        region_name=os.environ.get("AWS_DEFAULT_REGION", "ap-southeast-1"),
+        aws_access_key_id=os.environ.get("AWS_ACCESS_KEY_ID") or None,
+        aws_secret_access_key=os.environ.get("AWS_SECRET_ACCESS_KEY") or None,
+        aws_session_token=os.environ.get("AWS_SESSION_TOKEN") or None,
+    )
+    s3.upload_file(local_path, bucket, s3_key)
+    size = os.path.getsize(local_path)
+    print(f"  ↑ s3://{bucket}/{s3_key}  ({size:,} bytes)")
 import pickle
 import pandas as pd
 import json
@@ -539,7 +553,7 @@ def main():
                     local_path = os.path.join(root, file)
                     rel_path = os.path.relpath(local_path, local_model_dir)
                     s3_key = f"{s3_base_key}/{rel_path}".replace("\\", "/")
-                    upload_file(local_path, s3_key, bucket=S3_OUTPUT_BUCKET)
+                    s3_upload_file(local_path, s3_key, bucket=S3_OUTPUT_BUCKET)
 
         model_uri = f"s3://{S3_OUTPUT_BUCKET}/{s3_base_key}"
         mv = mlflow.register_model(model_uri, MLFLOW_MODEL_NAME)

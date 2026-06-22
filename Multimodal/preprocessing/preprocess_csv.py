@@ -21,9 +21,7 @@ import pandas as pd
 from sklearn.preprocessing import LabelEncoder, StandardScaler
 from sklearn.impute import SimpleImputer
 
-from s3_utils import (
-    S3_OUTPUT_BUCKET,
-)
+
 import pickle
 
 DATA_DIR = os.environ.get("DATA_DIR", "/app/data")
@@ -43,7 +41,7 @@ CAT_COLS = ["sex", "anatom_site_general"]   # encode riêng
 def main():
     print("=" * 60)
     print("BƯỚC 2b: Tiền xử lý CSV")
-    print(f"  Bucket: s3://{S3_OUTPUT_BUCKET}/preprocessed/")
+    print(f"  Thư mục: {os.path.join(DATA_DIR, 'preprocessed/')}")
     print("=" * 60)
 
     df = pd.read_csv(os.path.join(DATA_DIR, "raw/metadata.csv"))

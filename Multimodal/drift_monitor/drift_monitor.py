@@ -32,14 +32,13 @@ import numpy as np
 import pandas as pd
 from scipy.stats import ks_2samp, wasserstein_distance
 
-from s3_utils import (
-    download_bytes,
-    list_s3_keys,
-    load_npy,
-    upload_bytes,
-    S3_OUTPUT_BUCKET,
-)
+DATA_DIR = os.environ.get("DATA_DIR", "/data")
+BASELINE_DIR = os.environ.get("BASELINE_DIR", os.path.join(DATA_DIR, "preprocessed"))
+PRODUCTION_LOG_DIR = os.environ.get("PRODUCTION_LOG_DIR", os.path.join(DATA_DIR, "production_logs"))
+REPORT_DIR = os.environ.get("REPORT_DIR", os.path.join(DATA_DIR, "drift_reports"))
+SPLITS_DIR = os.environ.get("SPLITS_DIR", os.path.join(DATA_DIR, "splits"))
 
+os.makedirs(REPORT_DIR, exist_ok=True)
 # ── Logging ──────────────────────────────────────────────────────────────────
 logging.basicConfig(
     level=logging.INFO,
@@ -55,11 +54,8 @@ KS_ALPHA          = float(os.environ.get("KS_ALPHA", "0.05"))
 PRED_RATE_DELTA   = float(os.environ.get("PRED_RATE_DELTA", "0.05"))
 IMG_DRIFT_SAMPLE  = int(os.environ.get("IMG_DRIFT_SAMPLE", "10000"))
 
-# ── Đường dẫn S3 ─────────────────────────────────────────────────────────────
-BASELINE_KEY       = "preprocessed/baseline_profile.json"
-PROD_LOG_PREFIX    = "preprocessed/production_logs/"
-REPORT_PREFIX      = "preprocessed/drift_reports/"
-IMG_BASELINE_KEY   = "splits/train/X_img_train.npy"   # tuỳ chọn
+BASELINE_PATH       = os.path.join(BASELINE_DIR, "baseline_profile.json")
+IMG_BASELINE_PATH   = os.path.join(SPLITS_DIR, "train/X_img_train.npy")
 
 
 # ╔══════════════════════════════════════════════════════════════════════════╗
@@ -257,32 +253,35 @@ def overall_status(alerts: list[dict]) -> str:
 
 def load_baseline() -> dict | None:
     try:
-        raw = download_bytes(BASELINE_KEY, bucket=S3_OUTPUT_BUCKET)
-        return json.loads(raw.decode())
+        with open(BASELINE_PATH, "r", encoding="utf-8") as f:
+            return json.load(f)
     except Exception as e:
-        log.warning(f"Chưa có baseline tại s3://{S3_OUTPUT_BUCKET}/{BASELINE_KEY}: {e}")
+        log.warning(f"Chưa có baseline tại {BASELINE_PATH}: {e}")
         return None
 
 
 def load_production_logs() -> pd.DataFrame | None:
-    keys = list_s3_keys(PROD_LOG_PREFIX, bucket=S3_OUTPUT_BUCKET)
-    dfs  = []
-    for key in keys:
+    if not os.path.exists(PRODUCTION_LOG_DIR):
+        log.warning(f"Thư mục {PRODUCTION_LOG_DIR} không tồn tại.")
+        return None
+        
+    dfs = []
+    for filename in os.listdir(PRODUCTION_LOG_DIR):
+        path = os.path.join(PRODUCTION_LOG_DIR, filename)
         try:
-            data = download_bytes(key, bucket=S3_OUTPUT_BUCKET)
-            if key.endswith(".parquet"):
-                dfs.append(pd.read_parquet(io.BytesIO(data)))
-            elif key.endswith(".csv"):
-                dfs.append(pd.read_csv(io.BytesIO(data)))
+            if filename.endswith(".parquet"):
+                dfs.append(pd.read_parquet(path))
+            elif filename.endswith(".csv"):
+                dfs.append(pd.read_csv(path))
         except Exception as e:
-            log.warning(f"Không đọc được {key}: {e}")
+            log.warning(f"Không đọc được {path}: {e}")
     return pd.concat(dfs, ignore_index=True) if dfs else None
 
 
 def load_image_baseline() -> np.ndarray | None:
-    """Tải baseline image array từ S3 (tuỳ chọn)."""
+    """Tải baseline image array từ local (tuỳ chọn)."""
     try:
-        return load_npy(IMG_BASELINE_KEY, bucket=S3_OUTPUT_BUCKET)
+        return np.load(IMG_BASELINE_PATH, allow_pickle=False)
     except Exception:
         return None
 
@@ -312,8 +311,7 @@ def check_drift():
     # ── 2. Load production logs ───────────────────────────────────────────
     prod_df = load_production_logs()
     if prod_df is None or prod_df.empty:
-        log.warning(f"Không có production logs tại "
-                    f"s3://{S3_OUTPUT_BUCKET}/{PROD_LOG_PREFIX}")
+        log.warning(f"Không có production logs tại {PRODUCTION_LOG_DIR}")
         return
     log.info(f"Production logs: {len(prod_df):,} records")
 
@@ -374,7 +372,7 @@ def check_drift():
             except Exception as e:
                 log.info(f"  Image drift bỏ qua: {e}")
         elif X_img_baseline is None:
-            log.info("  Không có X_img_train.npy trên S3 — bỏ qua image drift")
+            log.info("  Không có X_img_train.npy local — bỏ qua image drift")
     else:
         log.info("  Không có cột image_array trong log — bỏ qua image drift")
 
@@ -431,14 +429,15 @@ def check_drift():
         "prediction_drift":   pred_drift_results,
     }
 
-    report_key = f"{REPORT_PREFIX}drift_report_{date_str}.json"
-    upload_bytes(json.dumps(report, indent=2).encode(),
-                 report_key, bucket=S3_OUTPUT_BUCKET)
+    report_path = os.path.join(REPORT_DIR, f"drift_report_{date_str}.json")
+    with open(report_path, "w", encoding="utf-8") as f:
+        json.dump(report, f, indent=2)
+        
     log.info(f"\n{'='*65}")
     log.info(f"  TỔNG KẾT: {status}")
     log.info(f"  Alerts  : {len(alerts)}")
     log.info(f"{'='*65}")
-    log.info(f"Report → s3://{S3_OUTPUT_BUCKET}/{report_key}")
+    log.info(f"Report → {report_path}")
 
     # ── 7. Evidently HTML Dashboard ───────────────────────────────────────
     _try_evidently_dashboard(baseline, feature_names, feature_stats,
@@ -479,12 +478,9 @@ def _try_evidently_dashboard(baseline: dict, feature_names: list,
         evr     = Report(metrics=[DataDriftPreset()])
         evr.run(reference_data=ref_df, current_data=prod_df[cols_ok])
 
-        html_buf = io.StringIO()
-        evr.save_html(html_buf)
-        html_key = f"{REPORT_PREFIX}drift_dashboard_{date_str}.html"
-        upload_bytes(html_buf.getvalue().encode(), html_key,
-                     bucket=S3_OUTPUT_BUCKET)
-        log.info(f"Evidently → s3://{S3_OUTPUT_BUCKET}/{html_key}")
+        html_path = os.path.join(REPORT_DIR, f"drift_dashboard_{date_str}.html")
+        evr.save_html(html_path)
+        log.info(f"Evidently → {html_path}")
     except Exception as e:
         log.info(f"Evidently bỏ qua: {e}")
 
@@ -496,7 +492,6 @@ def _try_evidently_dashboard(baseline: dict, feature_names: list,
 def main():
     # Argo CronWorkflow tự schedule — container chạy 1 lần rồi exit.
     log.info(f"Drift Monitor khởi động (single-run mode)")
-    log.info(f"Bucket: s3://{S3_OUTPUT_BUCKET}/")
     log.info(f"PSI ngưỡng: WARNING≥{PSI_WARNING} | CRITICAL≥{PSI_THRESHOLD}")
     log.info(f"KS alpha={KS_ALPHA} | Pred rate delta={PRED_RATE_DELTA}")
     check_drift()

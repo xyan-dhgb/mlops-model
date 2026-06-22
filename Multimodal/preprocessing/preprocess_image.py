@@ -20,10 +20,7 @@ import h5py
 from PIL import Image, ImageEnhance
 from tqdm import tqdm
 
-from s3_utils import (
-    get_s3_client,
-    S3_INPUT_BUCKET, S3_INPUT_PREFIX
-)
+
 
 DATA_DIR = os.environ.get("DATA_DIR", "/app/data")
 RAW_IMG_DIR = os.path.join(DATA_DIR, "raw/images")
@@ -91,13 +88,11 @@ def main():
     print(f"Sẽ xử lý: {len(selected_ids):,} ảnh "
           f"(Mal={n_mal}, Ben={n_ben})")
 
-    # Tải HDF5 vào file tạm (streaming từ S3)
-    hdf5_key = f"{S3_INPUT_PREFIX}/train-image.hdf5"
-    print(f"\nĐang tải HDF5 từ s3://{S3_INPUT_BUCKET}/{hdf5_key} ...")
-    s3 = get_s3_client()
-    with tempfile.NamedTemporaryFile(suffix=".hdf5", delete=False) as tmp:
-        s3.download_file(S3_INPUT_BUCKET, hdf5_key, tmp.name)
-        hdf5_local = tmp.name
+    hdf5_local = os.path.join(DATA_DIR, "raw/train-image.hdf5")
+    print(f"\nSử dụng HDF5 tại {hdf5_local} ...")
+
+    if not os.path.exists(hdf5_local):
+        raise FileNotFoundError(f"Không tìm thấy {hdf5_local}. Hãy đảm bảo DVC đã pull dữ liệu.")
 
     print("Bắt đầu trích xuất + tiền xử lý ảnh...")
     extracted = preprocessed = skipped = errors = 0
@@ -139,7 +134,7 @@ def main():
                 if errors <= 5:
                     print(f"  Lỗi {isic_id}: {e}")
 
-    os.unlink(hdf5_local)
+
     print(f"\nKết quả:")
     print(f"  Đã extract : {extracted:,} ảnh → {RAW_IMG_DIR}")
     print(f"  Đã preprocess: {preprocessed:,} → {PRE_IMG_DIR}")
