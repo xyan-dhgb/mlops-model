@@ -8,7 +8,7 @@ RUN pip install --no-cache-dir \
     numpy==1.26.4 \
     pandas==2.2.2 \
     scipy==1.13.0 \
-    evidently==0.4.30 \
+    evidently==0.4.30
 COPY Multimodal/drift_monitor/drift_monitor.py .
 # No s3_utils
 
