@@ -316,10 +316,10 @@ def main():
             X_tab_val, y_val = xs, ys
         elif name == "test":
             X_tab_test, y_test = xs, ys
-            
+
         # Dọn dẹp RAM ngay sau khi lưu
         del xi
-        
+
     import gc
     del X_images
     gc.collect()
