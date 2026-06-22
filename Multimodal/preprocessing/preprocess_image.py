@@ -132,8 +132,6 @@ def main():
                 errors += 1
                 if errors <= 5:
                     print(f"  Lỗi {isic_id}: {e}")
-
-
     print(f"\nKết quả:")
     print(f"  Đã extract : {extracted:,} ảnh → {RAW_IMG_DIR}")
     print(f"  Đã preprocess: {preprocessed:,} → {PRE_IMG_DIR}")
