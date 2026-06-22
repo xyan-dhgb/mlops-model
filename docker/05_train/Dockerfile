@@ -11,8 +11,8 @@ RUN apt-get update && apt-get install -y git && rm -rf /var/lib/apt/lists/* \
 # Cài đè thủ công trước để mlflow cài blinker mới không bị xung đột.
 RUN pip install --no-cache-dir --ignore-installed blinker
 RUN pip install --no-cache-dir \
-    dvc[s3]==3.40.0 \
-    pathspec==0.11.2 \
+    
+    
     boto3==1.34.40 \
     numpy==1.26.4 \
     pandas==2.2.2 \
@@ -51,5 +51,5 @@ ENV PHASE1_LR=0.001
 ENV PHASE2_LR=0.0001
 ENV IMAGE_SIZE=224
 
-COPY .dvc/ .dvc/
+
 CMD ["python", "train.py"]

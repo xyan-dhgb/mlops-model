@@ -22,6 +22,10 @@ import numpy as np
 import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
+import concurrent.futures
+import sys
+sys.path.append(os.path.join(os.path.dirname(__file__), '..', 'utils'))
+import s3_utils
 import tensorflow as tf
 from PIL import Image
 
@@ -227,6 +231,21 @@ def main():
         feature_cols = feature_cols,
         prefix       = XAI_PREFIX,
     )
+    print("\nĐồng bộ thư mục lên S3 Output Bucket (thay thế DVC)...")
+    def upload_worker(local_path):
+        rel_path = os.path.relpath(local_path, DATA_DIR)
+        s3_key = rel_path.replace("\\", "/")
+        s3_utils.upload_file(local_path, s3_key)
+        
+    upload_list = []
+    xai_dir = os.path.join(DATA_DIR, XAI_PREFIX)
+    for root, dirs, files in os.walk(xai_dir):
+        for f in files:
+            upload_list.append(os.path.join(root, f))
+            
+    print(f"Bắt đầu upload {len(upload_list)} file XAI bằng đa luồng...")
+    with concurrent.futures.ThreadPoolExecutor(max_workers=16) as executor:
+        list(tqdm(executor.map(upload_worker, upload_list), total=len(upload_list), desc="Uploading"))
 
     print("\nBước 7 hoàn thành!")
 

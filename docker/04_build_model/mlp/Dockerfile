@@ -6,8 +6,8 @@ RUN apt-get update && apt-get install -y git && rm -rf /var/lib/apt/lists/* \
     && git init
 
 RUN pip install --no-cache-dir --retries 5 --timeout 60 \
-    dvc[s3]==3.40.0 \
-    pathspec==0.11.2 \
+    
+    
     boto3==1.34.40 \
     numpy==1.26.4 \
     pandas==2.2.2 \
@@ -21,5 +21,5 @@ ENV TF_USE_LEGACY_KERAS=1
 ENV PROCESSED_DIR=/app/data/processed
 ENV MODEL_DIR=/app/data/model
 
-COPY .dvc/ .dvc/
+
 CMD ["python", "build_mlp.py"]

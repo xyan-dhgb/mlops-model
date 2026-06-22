@@ -23,6 +23,9 @@ Khớp notebook cell 38 (compute_pauc, find_optimal_threshold):
 import io
 import json
 import os
+import sys
+sys.path.append(os.path.join(os.path.dirname(__file__), '..', 'utils'))
+import s3_utils
 import numpy as np
 import matplotlib
 matplotlib.use("Agg")
@@ -189,6 +192,18 @@ def main():
         json.dump(baseline, f, indent=2)
 
     print(f"\nTất cả kết quả → {DATA_DIR}/final/")
+    
+    print("\nĐồng bộ file lên S3 Output Bucket (thay thế DVC)...")
+    files_to_upload = [
+        "metrics.json",
+        "best_threshold.txt",
+        "roc_curve.png",
+        "confusion_matrix.png",
+        "baseline_profile.json"
+    ]
+    for f in files_to_upload:
+        s3_utils.upload_file(os.path.join(DATA_DIR, f"final/{f}"), f"final/{f}")
+        
     print("\nBước 6 hoàn thành!")
 
 

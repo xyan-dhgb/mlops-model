@@ -6,8 +6,8 @@ RUN apt-get update && apt-get install -y git && rm -rf /var/lib/apt/lists/* \
     && git init
 
 RUN pip install --no-cache-dir \
-    dvc[s3]==3.40.0 \
-    pathspec==0.11.2 \
+    
+    
     boto3==1.34.40 \
     h5py==3.11.0 \
     pandas==2.2.2
@@ -23,5 +23,5 @@ ENV AWS_REGION=ap-southeast-1
 ENV S3_INPUT_BUCKET=kltn-isic-2024-challenge
 ENV S3_INPUT_PREFIX=isic-2024-challenge
 
-COPY .dvc/ .dvc/
+
 CMD ["python", "download_dataset.py"]

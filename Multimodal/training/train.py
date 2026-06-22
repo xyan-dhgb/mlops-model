@@ -25,6 +25,9 @@ MLflow:
 """
 import os
 import sys
+import datetime
+sys.path.append(os.path.join(os.path.dirname(__file__), '..', 'utils'))
+import s3_utils
 import tempfile
 import numpy as np
 import tensorflow as tf
@@ -573,6 +576,13 @@ def main():
     print(f"\n  Model → {KEY_PHASE2}")
     print(f"  MLflow Run: {MLFLOW_TRACKING_URI}/#/experiments/{MLFLOW_EXPERIMENT}/runs/{run_id}")
     print(f"  Registry  : {MLFLOW_MODEL_NAME} v{mv.version}")
+
+    print("\nĐồng bộ file lên S3 Output Bucket (thay thế DVC)...")
+    s3_utils.upload_file(os.path.join(DATA_DIR, "final/best_model_phase1.h5"), "final/best_model_phase1.h5")
+    s3_utils.upload_file(os.path.join(DATA_DIR, "final/best_model_isic2024.h5"), "final/best_model_isic2024.h5")
+    s3_utils.upload_file(os.path.join(DATA_DIR, "final/training_history.pkl"), "final/training_history.pkl")
+    s3_utils.upload_file(os.path.join(DATA_DIR, "final/model_architecture.json"), "final/model_architecture.json")
+
     print("\nBước 5 hoàn thành!")
 
 

@@ -16,6 +16,11 @@ Pipeline (khớp notebook cell 19 + cell 32):
 """
 import os
 import io
+import json
+import boto3
+import sys
+sys.path.append(os.path.join(os.path.dirname(__file__), '..', 'utils'))
+import s3_utils
 import numpy as np
 import pandas as pd
 from sklearn.preprocessing import LabelEncoder, StandardScaler
@@ -111,6 +116,10 @@ def main():
     print(f"Feature cols: {len(all_feature_cols)}")
     print(f"Lưu → {DATA_DIR}/preprocessed/metadata_clean.csv")
     print(f"Lưu → {DATA_DIR}/preprocessed/encoders.pkl")
+    print("\nĐồng bộ file lên S3 Output Bucket (thay thế DVC)...")
+    s3_utils.upload_file(os.path.join(DATA_DIR, "preprocessed/metadata_clean.csv"), "preprocessed/metadata_clean.csv")
+    s3_utils.upload_file(os.path.join(DATA_DIR, "preprocessed/encoders.pkl"), "preprocessed/encoders.pkl")
+
     print("\nBước 2b hoàn thành!")
 
 

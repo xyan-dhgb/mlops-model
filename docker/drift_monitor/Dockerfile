@@ -6,8 +6,8 @@ RUN apt-get update && apt-get install -y git && rm -rf /var/lib/apt/lists/* \
     && git init
 
 RUN pip install --no-cache-dir \
-    dvc[s3]==3.40.0 \
-    pathspec==0.11.2 \
+    
+    
     boto3==1.34.40 \
     numpy==1.26.4 \
     pandas==2.2.2 \
@@ -23,5 +23,5 @@ ENV CHECK_INTERVAL_HOURS=24
 ENV PSI_THRESHOLD=0.25
 ENV KS_P_THRESHOLD=0.05
 
-COPY .dvc/ .dvc/
+
 CMD ["python", "drift_monitor.py"]

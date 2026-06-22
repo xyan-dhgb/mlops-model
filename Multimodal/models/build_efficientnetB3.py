@@ -9,7 +9,10 @@ Ghi:
   (weights không lưu — model được build lại khi train)
 """
 import json
+import sys
 import os
+sys.path.append(os.path.join(os.path.dirname(__file__), '..', 'utils'))
+import s3_utils
 import numpy as np
 import tensorflow as tf
 from tensorflow.keras.applications import EfficientNetB3
@@ -92,6 +95,11 @@ def main():
 
     print(f"\nLưu → {arch_path}")
     print(f"Lưu → {meta_path}")
+
+    print("\nĐồng bộ file lên S3 Output Bucket (thay thế DVC)...")
+    s3_utils.upload_file(arch_path, "preprocessed/efficientnetB3_architecture.json")
+    s3_utils.upload_file(meta_path, "preprocessed/efficientnetB3_meta.json")
+
     print("\nBước 4a hoàn thành!")
 
 

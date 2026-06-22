@@ -18,6 +18,10 @@ import numpy as np
 import cv2
 import h5py
 from PIL import Image, ImageEnhance
+import concurrent.futures
+import sys
+sys.path.append(os.path.join(os.path.dirname(__file__), '..', 'utils'))
+import s3_utils
 from tqdm import tqdm
 
 
@@ -137,6 +141,18 @@ def main():
     print(f"  Đã preprocess: {preprocessed:,} → {PRE_IMG_DIR}")
     print(f"  Bỏ qua (đã có): {skipped:,}")
     print(f"  Lỗi: {errors}")
+
+    print("\nĐồng bộ thư mục lên S3 Output Bucket (thay thế DVC)...")
+    def upload_worker(filename):
+        local_path = os.path.join(PRE_IMG_DIR, filename)
+        s3_key = f"preprocessed/images/{filename}"
+        s3_utils.upload_file(local_path, s3_key)
+        
+    all_files = os.listdir(PRE_IMG_DIR)
+    print(f"Bắt đầu upload {len(all_files)} file ảnh bằng đa luồng...")
+    with concurrent.futures.ThreadPoolExecutor(max_workers=32) as executor:
+        list(tqdm(executor.map(upload_worker, all_files), total=len(all_files), desc="Uploading"))
+
     print("\nBước 2a hoàn thành!")
 
 

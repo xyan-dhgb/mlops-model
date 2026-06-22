@@ -8,6 +8,9 @@ import os
 import json
 import boto3
 import pandas as pd
+import sys
+sys.path.append(os.path.join(os.path.dirname(__file__), '..', 'utils'))
+import s3_utils
 
 DATA_DIR = os.environ.get("DATA_DIR", "/app/data/raw")
 S3_INPUT_BUCKET = os.environ.get("S3_INPUT_BUCKET", "kltn-isic-2024-challenge")
@@ -90,6 +93,12 @@ def main():
     with open(manifest_path, "w", encoding="utf-8") as f:
         json.dump(manifest, f, indent=2)
     print(f"\n[3/3] Manifest lưu → {manifest_path}")
+
+    # Đẩy lên S3 Output bucket (thay thế cho DVC)
+    print("\nĐẩy artifacts lên S3 Output Bucket...")
+    s3_utils.upload_file(csv_out_path, "raw/metadata.csv")
+    s3_utils.upload_file(manifest_path, "raw/manifest.json")
+    
     print("\nBước 1 hoàn thành!")
 
 if __name__ == "__main__":

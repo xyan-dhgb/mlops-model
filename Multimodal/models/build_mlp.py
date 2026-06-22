@@ -16,6 +16,9 @@ from tensorflow.keras.layers import Input, Dense, Dropout, BatchNormalization
 
 import os
 import pickle
+import sys
+sys.path.append(os.path.join(os.path.dirname(__file__), '..', 'utils'))
+import s3_utils
 
 DATA_DIR = os.environ.get("DATA_DIR", "/app/data")
 os.makedirs(os.path.join(DATA_DIR, "preprocessed"), exist_ok=True)
@@ -67,6 +70,11 @@ def main():
 
     print(f"\nLưu → {arch_path}")
     print(f"Lưu → {meta_path}")
+
+    print("\nĐồng bộ file lên S3 Output Bucket (thay thế DVC)...")
+    s3_utils.upload_file(arch_path, "preprocessed/mlp_architecture.json")
+    s3_utils.upload_file(meta_path, "preprocessed/mlp_meta.json")
+
     print("\nBước 4b hoàn thành!")
 
 

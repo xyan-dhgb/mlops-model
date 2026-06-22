@@ -11,8 +11,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && rm -rf /var/lib/apt/lists/*
 
 RUN pip install --no-cache-dir \
-    dvc[s3]==3.40.0 \
-    pathspec==0.11.2 \
+    
+    
     boto3==1.34.40 \
     numpy==1.26.4 \
     pandas==2.2.2 \
@@ -38,6 +38,6 @@ ENV NUM_GRADCAM_SAMPLES=20
 ENV NUM_SHAP_SAMPLES=100
 ENV SHAP_BACKGROUND=50
 
-COPY .dvc/ .dvc/
+
 CMD ["python", "xai.py"]
 

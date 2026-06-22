@@ -39,6 +39,11 @@ from sklearn.model_selection import train_test_split
 import cv2
 
 import pickle
+import albumentations as A
+import concurrent.futures
+import sys
+sys.path.append(os.path.join(os.path.dirname(__file__), '..', 'utils'))
+import s3_utils
 import pandas as pd
 
 DATA_DIR = os.environ.get("DATA_DIR", "/app/data")
@@ -383,7 +388,25 @@ def main():
     print(f"  train_os  : {len(y_train_os):>6,} mẫu  (sau oversampling {OVERSAMPLE_RATIO:.0%} Malignant)")
     print(f"  val       : {len(y_val):>6,} mẫu  (không oversample)")
     print(f"  test      : {len(y_test):>6,} mẫu  (không oversample)")
-    print(f"\n  Split info → {split_info_path}")
+    print("\n  Split info → {split_info_path}")
+
+    print("\nĐồng bộ thư mục lên S3 Output Bucket (thay thế DVC)...")
+    def upload_worker(local_path):
+        rel_path = os.path.relpath(local_path, DATA_DIR)
+        # convert backslashes to forward slashes for S3
+        s3_key = rel_path.replace("\\", "/")
+        s3_utils.upload_file(local_path, s3_key)
+        
+    upload_list = []
+    for d in ["features", "splits"]:
+        for root, dirs, files in os.walk(os.path.join(DATA_DIR, d)):
+            for f in files:
+                upload_list.append(os.path.join(root, f))
+                
+    print(f"Bắt đầu upload {len(upload_list)} file array/json bằng đa luồng...")
+    with concurrent.futures.ThreadPoolExecutor(max_workers=16) as executor:
+        list(tqdm(executor.map(upload_worker, upload_list), total=len(upload_list), desc="Uploading"))
+
     print("\nBước 3 hoàn thành!")
 
 
