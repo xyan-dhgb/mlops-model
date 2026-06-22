@@ -18,8 +18,8 @@ RUN pip install --no-cache-dir --retries 5 --timeout 60 \
 
 COPY Multimodal/data_loader/dataloader.py .
 
-ENV PROCESSED_DIR=/data/processed
-ENV SPLITS_DIR=/data/splits
+ENV PROCESSED_DIR=/app/data/processed
+ENV SPLITS_DIR=/app/data/splits
 ENV IMAGE_SIZE=224
 ENV RANDOM_SEED=42
 

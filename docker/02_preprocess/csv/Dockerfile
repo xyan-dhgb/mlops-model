@@ -15,8 +15,8 @@ RUN pip install --no-cache-dir \
 
 COPY Multimodal/preprocessing/preprocess_csv.py .
 
-ENV RAW_DIR=/data/raw
-ENV PROCESSED_DIR=/data/processed
+ENV RAW_DIR=/app/data/raw
+ENV PROCESSED_DIR=/app/data/processed
 
 COPY .dvc/ .dvc/
 CMD ["python", "preprocess_csv.py"]

@@ -35,10 +35,10 @@ COPY Multimodal/ml_metrics.py .
 # serialization khi load .h5 (quantization_config, renorm, get_tensor args, ...)
 ENV TF_USE_LEGACY_KERAS=1
 
-ENV PROCESSED_DIR=/data/processed
-ENV SPLITS_DIR=/data/splits
-ENV OUTPUT_DIR=/data/output
-ENV EVAL_DIR=/data/eval
+ENV PROCESSED_DIR=/app/data/processed
+ENV SPLITS_DIR=/app/data/splits
+ENV OUTPUT_DIR=/app/data/output
+ENV EVAL_DIR=/app/data/eval
 
 COPY .dvc/ .dvc/
 CMD ["python", "evaluate.py"]

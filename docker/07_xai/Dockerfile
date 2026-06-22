@@ -29,11 +29,11 @@ COPY Multimodal/utils/xai.py .
 # Buộc TF 2.16 dùng Keras 2 (tf_keras) thay vì Keras 3
 ENV TF_USE_LEGACY_KERAS=1
 
-ENV PROCESSED_DIR=/data/processed
-ENV SPLITS_DIR=/data/splits
-ENV OUTPUT_DIR=/data/output
-ENV EVAL_DIR=/data/eval
-ENV XAI_DIR=/data/xai
+ENV PROCESSED_DIR=/app/data/processed
+ENV SPLITS_DIR=/app/data/splits
+ENV OUTPUT_DIR=/app/data/output
+ENV EVAL_DIR=/app/data/eval
+ENV XAI_DIR=/app/data/xai
 ENV NUM_GRADCAM_SAMPLES=20
 ENV NUM_SHAP_SAMPLES=100
 ENV SHAP_BACKGROUND=50

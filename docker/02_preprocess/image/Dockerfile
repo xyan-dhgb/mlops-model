@@ -26,8 +26,8 @@ RUN pip install --no-cache-dir --retries 5 --timeout 60 \
 
 COPY Multimodal/preprocessing/preprocess_image.py .
 
-ENV RAW_DIR=/data/raw
-ENV PROCESSED_DIR=/data/processed
+ENV RAW_DIR=/app/data/raw
+ENV PROCESSED_DIR=/app/data/processed
 ENV IMAGE_SIZE=224
 ENV MAX_IMAGES=""
 

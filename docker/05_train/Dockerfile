@@ -37,10 +37,10 @@ COPY Multimodal/ml_metrics.py .
 # ở format Keras 2, tương thích với evaluate/xai steps.
 ENV TF_USE_LEGACY_KERAS=1
 
-ENV PROCESSED_DIR=/data/processed
-ENV SPLITS_DIR=/data/splits
-ENV MODEL_DIR=/data/model
-ENV OUTPUT_DIR=/data/output
+ENV PROCESSED_DIR=/app/data/processed
+ENV SPLITS_DIR=/app/data/splits
+ENV MODEL_DIR=/app/data/model
+ENV OUTPUT_DIR=/app/data/output
 ENV PHASE1_EPOCHS=20
 ENV PHASE2_EPOCHS=10
 ENV BATCH_SIZE=32

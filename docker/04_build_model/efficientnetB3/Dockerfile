@@ -19,8 +19,8 @@ RUN pip install --no-cache-dir --retries 5 --timeout 60 \
 COPY Multimodal/models/build_efficientnetB3.py .
 
 ENV TF_USE_LEGACY_KERAS=1
-ENV PROCESSED_DIR=/data/processed
-ENV MODEL_DIR=/data/model
+ENV PROCESSED_DIR=/app/data/processed
+ENV MODEL_DIR=/app/data/model
 ENV IMAGE_SIZE=224
 
 COPY .dvc/ .dvc/
