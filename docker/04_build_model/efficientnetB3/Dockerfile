@@ -5,6 +5,8 @@ FROM python:3.10-slim
 WORKDIR /app
 
 RUN pip install --no-cache-dir --retries 5 --timeout 60 \
+    dvc[s3]==3.40.0 \
+    boto3==1.34.40 \
     tensorflow-cpu==2.16.1 \
     numpy==1.26.4 \
     h5py==3.11.0 \
