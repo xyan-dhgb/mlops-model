@@ -28,6 +28,7 @@ RUN pip install --no-cache-dir \
     tqdm==4.66.4 \
     tf_keras==2.16.0
 
+COPY Multimodal/utils/s3_utils.py /utils/s3_utils.py
 COPY Multimodal/training/evaluate.py .
 COPY Multimodal/ml_metrics.py .
 

@@ -15,6 +15,7 @@ RUN pip install --no-cache-dir --retries 5 --timeout 60 \
     tensorflow-cpu==2.16.1 \
     tf_keras==2.16.0
 
+COPY Multimodal/utils/s3_utils.py /utils/s3_utils.py
 COPY Multimodal/models/build_mlp.py .
 
 ENV TF_USE_LEGACY_KERAS=1

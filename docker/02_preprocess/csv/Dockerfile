@@ -13,6 +13,7 @@ RUN pip install --no-cache-dir \
     pandas==2.2.2 \
     scikit-learn==1.5.0
 
+COPY Multimodal/utils/s3_utils.py /utils/s3_utils.py
 COPY Multimodal/preprocessing/preprocess_csv.py .
 
 ENV RAW_DIR=/app/data/raw

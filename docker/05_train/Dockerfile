@@ -29,6 +29,7 @@ RUN pip install --no-cache-dir \
     prometheus_client>=0.17.0 \
     tf_keras==2.16.0
 
+COPY Multimodal/utils/s3_utils.py /utils/s3_utils.py
 COPY Multimodal/training/train.py .
 COPY Multimodal/training/augment.py .
 COPY Multimodal/ml_metrics.py .

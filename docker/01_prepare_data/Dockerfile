@@ -12,6 +12,7 @@ RUN pip install --no-cache-dir \
     h5py==3.11.0 \
     pandas==2.2.2
 
+COPY Multimodal/utils/s3_utils.py /utils/s3_utils.py
 COPY Multimodal/data/download_dataset.py .
 
 # DATA_DIR and AWS/S3 settings are passed by the runtime environment.

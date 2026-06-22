@@ -24,6 +24,7 @@ RUN pip install --no-cache-dir --retries 5 --timeout 60 \
     Pillow==10.3.0 \
     tqdm==4.66.4
 
+COPY Multimodal/utils/s3_utils.py /utils/s3_utils.py
 COPY Multimodal/preprocessing/preprocess_image.py .
 
 ENV RAW_DIR=/app/data/raw

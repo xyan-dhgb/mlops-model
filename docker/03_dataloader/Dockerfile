@@ -16,6 +16,7 @@ RUN pip install --no-cache-dir --retries 5 --timeout 60 \
     tqdm==4.66.4 \
     opencv-python-headless>=4.8
 
+COPY Multimodal/utils/s3_utils.py /utils/s3_utils.py
 COPY Multimodal/data_loader/dataloader.py .
 
 ENV PROCESSED_DIR=/app/data/processed
