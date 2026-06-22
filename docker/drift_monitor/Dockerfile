@@ -7,11 +7,8 @@ RUN pip install --no-cache-dir \
     pandas==2.2.2 \
     scipy==1.13.0 \
     evidently==0.4.30 \
-    dvc[s3] \
-    boto3 \
-    s3fs
-
-COPY Multimodal/drift_monitor/drift_monitor.py .
+    dvc[s3]>=3.40.0 \
+    COPY Multimodal/drift_monitor/drift_monitor.py .
 # No s3_utils
 
 ENV EVAL_DIR=/data/eval
