@@ -4,7 +4,6 @@ WORKDIR /app
 
 RUN pip install --no-cache-dir \
     dvc[s3]==3.40.0 \
-    s3fs==2024.2.0 \
     boto3==1.34.40 \
     h5py==3.11.0 \
     pandas==2.2.2
