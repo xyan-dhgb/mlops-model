@@ -118,7 +118,7 @@ def main():
     print(f"Lưu → {DATA_DIR}/preprocessed/encoders.pkl")
     print("\nĐồng bộ file lên S3 Output Bucket (thay thế DVC)...")
     s3_utils.upload_file(os.path.join(DATA_DIR, "preprocessed/metadata_clean.csv"), "preprocessed/metadata_clean.csv")
-    s3_utils.upload_file(os.path.join(DATA_DIR, "preprocessed/encoders.pkl"), "preprocessed/encoders.pkl")
+    s3_utils.upload_file(os.path.join(DATA_DIR, "preprocessed/encoders.pkl"), "final/encoders.pkl")
 
     print("\nBước 2b hoàn thành!")
 
