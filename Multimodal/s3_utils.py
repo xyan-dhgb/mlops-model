@@ -284,8 +284,15 @@ def _patch_h5_config_for_tfkeras(h5_path: str) -> str:
                 new_nodes, node_changed = [], False
                 for n in obj["inbound_nodes"]:
                     conv, was_changed = _k3_node_to_k2(n)
-                    new_nodes.append(conv)
-                    node_changed = node_changed or was_changed
+                    
+                    # Unwrap list of lists for single inputs (Keras 3 saves `[ ["layer", 0, 0, {}] ]`)
+                    if isinstance(conv, list) and len(conv) == 1 and isinstance(conv[0], (list, tuple)) and len(conv[0]) >= 3 and isinstance(conv[0][0], str):
+                        new_nodes.append(conv[0])
+                        node_changed = True
+                    else:
+                        new_nodes.append(conv)
+                        node_changed = node_changed or was_changed
+                        
                 if node_changed:
                     obj["inbound_nodes"] = new_nodes
                     changed[0] = True
