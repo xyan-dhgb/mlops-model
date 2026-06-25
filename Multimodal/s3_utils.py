@@ -233,16 +233,20 @@ def _patch_h5_config_for_tfkeras(h5_path: str) -> str:
             cls = obj.get("class_name", "")
             cfg = obj.get("config", {})
 
-            if cls == "InputLayer":
-                # batch_shape (Keras 3) → batch_input_shape (tf_keras)
-                if "batch_shape" in cfg and "batch_input_shape" not in cfg:
-                    shape = cfg.pop("batch_shape")
-                    # Keras 3 đôi khi lưu batch dim là số cụ thể (vd. 1) thay vì None.
-                    # tf_keras kỳ vọng None ở chiều batch → strip nếu shape[0] là int.
+            # Keras 3 quirk: it might save BOTH batch_input_shape and batch_shape.
+            # Remove batch_shape so tf_keras doesn't get confused and overwrite.
+            if "batch_shape" in cfg and "batch_input_shape" in cfg:
+                cfg.pop("batch_shape")
+                changed[0] = True
+
+            for key in ["batch_input_shape", "batch_shape"]:
+                if key in cfg:
+                    shape = cfg[key]
                     if isinstance(shape, (list, tuple)) and len(shape) >= 2 and shape[0] is not None and isinstance(shape[0], int):
-                        shape = list(shape[1:])
-                    cfg["batch_input_shape"] = shape
-                    changed[0] = True
+                        cfg[key] = list(shape[1:])
+                        changed[0] = True
+
+            if cls == "InputLayer":
                 # optional — không tồn tại trong tf_keras
                 if cfg.pop("optional", None) is not None:
                     changed[0] = True
